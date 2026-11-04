@@ -11,8 +11,9 @@
 #   r1 [bond0: r1-eth0, r1-eth1] ===== [bond0: r2-eth0, r2-eth1] r2
 #
 # - both members reach Collecting + Distributing;
-# - when the peer's member goes down, our member stops distributing;
-# - when it comes back, it distributes again;
+# - when the peer's member loses carrier, ours goes operationally down;
+# - when the peer stops sending LACPDUs (link up), ours stops distributing;
+# - when LACPDUs flow again, it distributes again;
 # - a member released from the bond no longer reports a state;
 # - a member of a non-LACP (balance-xor) bond reports no state.
 #
@@ -41,13 +42,17 @@ COLLECTING = 0x10
 
 
 def build_topo(tgen):
-    "Two routers joined by two links."
+    "Two routers joined by two direct links."
     for rname in ("r1", "r2"):
         tgen.add_router(rname)
+    # Direct links: a Linux bridge in between would not forward LACPDUs.
     for i in range(2):
-        switch = tgen.add_switch("s{}".format(i + 1))
-        switch.add_link(tgen.gears["r1"])
-        switch.add_link(tgen.gears["r2"])
+        tgen.add_link(
+            tgen.gears["r1"],
+            tgen.gears["r2"],
+            "r1-eth{}".format(i),
+            "r2-eth{}".format(i),
+        )
 
 
 def _have_bonding(router):
@@ -143,19 +148,44 @@ def test_members_distributing():
 
 
 def test_peer_member_down():
-    "The member stops distributing when the peer's member goes down."
+    "Carrier loss and silent LACP failure on the peer's member."
     tgen = get_topogen()
     _skip_without_bonding(tgen)
     r1 = tgen.gears["r1"]
     r2 = tgen.gears["r2"]
 
+    # Carrier loss: zebra sees the member go operationally down at once. The
+    # kernel changes the member's LACP state too, but only reports it with a
+    # later event, so the state itself is not checked here.
     step("Shut r2-eth1")
     r2.run("ip link set r2-eth1 down")
-    _expect_state(r1, "r1-eth1", valid=True, bits_clear=DISTRIBUTING)
+
+    def _oper_down():
+        intf = _intf_json(r1, "r1-eth1")
+        return (
+            None
+            if intf.get("operationalStatus") == "down"
+            else intf.get("operationalStatus")
+        )
+
+    _, result = topotest.run_and_expect(_oper_down, None, count=20, wait=0.5)
+    assert result is None, "r1-eth1 still operationally {}".format(result)
     _expect_state(r1, "r1-eth0", valid=True, bits_set=DISTRIBUTING)
 
     step("Bring r2-eth1 back")
     r2.run("ip link set r2-eth1 up")
+    _expect_state(r1, "r1-eth1", valid=True, bits_set=COLLECTING | DISTRIBUTING)
+
+    # Silent failure: the link stays up but LACPDUs stop. The LACP timeout
+    # changes the member's state, and the kernel reports that change.
+    step("Drop LACPDUs sent by r2-eth1")
+    r2.run("tc qdisc add dev r2-eth1 clsact")
+    r2.run("tc filter add dev r2-eth1 egress protocol 0x8809 matchall action drop")
+    _expect_state(r1, "r1-eth1", valid=True, bits_clear=DISTRIBUTING)
+    _expect_state(r1, "r1-eth0", valid=True, bits_set=DISTRIBUTING)
+
+    step("Let LACPDUs through again")
+    r2.run("tc qdisc del dev r2-eth1 clsact")
     _expect_state(r1, "r1-eth1", valid=True, bits_set=COLLECTING | DISTRIBUTING)
 
 
