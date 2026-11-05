@@ -17,6 +17,7 @@
 #include "nexthop_group.h"
 #include "link_state.h"
 #include "tc.h"
+#include "json.h"
 
 #include "sharp_globals.h"
 #include "sharp_nht.h"
@@ -1151,6 +1152,208 @@ void sharp_zebra_register_neigh(vrf_id_t vrf_id, afi_t afi, bool reg)
 }
 
 
+/*
+ * RFC 7130 micro-BFD bond member messages: sharpd plays the client (bfdd)
+ * so that zebra's side can be tested on its own. Received messages are
+ * kept for "show sharp lag-mbfd".
+ */
+#define SHARP_LAG_MAX	  16
+#define SHARP_LAG_MBR_MAX 64
+
+static struct sharp_lag_bond {
+	bool used;
+	struct zapi_lag_bond_status st;
+	uint32_t msgs;
+} sharp_lag_bonds[SHARP_LAG_MAX];
+
+static struct sharp_lag_mbr {
+	bool used;
+	struct zapi_lag_member m;
+	uint32_t msgs;
+} sharp_lag_mbrs[SHARP_LAG_MBR_MAX];
+
+static struct interface *sharp_lag_if_lookup(ifindex_t ifindex)
+{
+	struct interface *ifp;
+	struct vrf *vrf;
+
+	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id) {
+		ifp = if_lookup_by_index(ifindex, vrf->vrf_id);
+		if (ifp)
+			return ifp;
+	}
+	return NULL;
+}
+
+static void sharp_lag_forget(ifindex_t bond_ifindex)
+{
+	for (unsigned int i = 0; i < SHARP_LAG_MAX; i++)
+		if (sharp_lag_bonds[i].used && sharp_lag_bonds[i].st.bond_ifindex == bond_ifindex)
+			memset(&sharp_lag_bonds[i], 0, sizeof(sharp_lag_bonds[i]));
+	for (unsigned int i = 0; i < SHARP_LAG_MBR_MAX; i++)
+		if (sharp_lag_mbrs[i].used && sharp_lag_mbrs[i].m.bond_ifindex == bond_ifindex)
+			memset(&sharp_lag_mbrs[i], 0, sizeof(sharp_lag_mbrs[i]));
+}
+
+static int sharp_lag_bond_status(ZAPI_CALLBACK_ARGS)
+{
+	struct zapi_lag_bond_status st;
+	struct sharp_lag_bond *free_slot = NULL;
+
+	if (zapi_lag_bond_status_decode(zclient->ibuf, &st) < 0)
+		return -1;
+
+	zlog_debug("micro-BFD bond ifindex %u status %s mode %u members %u", st.bond_ifindex,
+		   zapi_lag_bond_status2str(st.status), st.bond_mode, st.member_count);
+
+	for (unsigned int i = 0; i < SHARP_LAG_MAX; i++) {
+		struct sharp_lag_bond *b = &sharp_lag_bonds[i];
+
+		if (b->used && b->st.bond_ifindex == st.bond_ifindex) {
+			b->st = st;
+			b->msgs++;
+			return 0;
+		}
+		if (!b->used && !free_slot)
+			free_slot = b;
+	}
+	if (free_slot) {
+		free_slot->used = true;
+		free_slot->st = st;
+		free_slot->msgs = 1;
+	}
+	return 0;
+}
+
+static int sharp_lag_member_update(ZAPI_CALLBACK_ARGS)
+{
+	struct zapi_lag_member m;
+	struct sharp_lag_mbr *free_slot = NULL;
+	char buf[128];
+
+	if (zapi_lag_member_decode(zclient->ibuf, &m) < 0)
+		return -1;
+
+	zlog_debug("micro-BFD member %s(%u) %s bond ifindex %u flags %s ad 0x%02x", m.mbr_name,
+		   m.mbr_ifindex, zapi_lag_mbr_op2str(m.op), m.bond_ifindex,
+		   zapi_lag_mbr_flags2str(m.flags, buf, sizeof(buf)), m.ad_actor_state);
+
+	for (unsigned int i = 0; i < SHARP_LAG_MBR_MAX; i++) {
+		struct sharp_lag_mbr *e = &sharp_lag_mbrs[i];
+
+		if (e->used && e->m.mbr_ifindex == m.mbr_ifindex) {
+			e->m = m;
+			e->msgs++;
+			return 0;
+		}
+		if (!e->used && !free_slot)
+			free_slot = e;
+	}
+	if (free_slot) {
+		free_slot->used = true;
+		free_slot->m = m;
+		free_slot->msgs = 1;
+	}
+	return 0;
+}
+
+int sharp_zebra_lag_register(struct interface *bond, bool reg, bool fail_open)
+{
+	sharp_lag_forget(bond->ifindex);
+
+	if (zclient_lag_mbfd_register(g_zclient, reg, bond->vrf->vrf_id, bond->ifindex,
+				      fail_open ? ZAPI_LAG_REG_F_FAIL_OPEN : 0) ==
+	    ZCLIENT_SEND_FAILURE)
+		return -1;
+
+	return 0;
+}
+
+int sharp_zebra_lag_dist_set(struct interface *bond, struct interface *mbr, bool enable)
+{
+	struct zapi_lag_dist dist = {
+		.bond_ifindex = bond->ifindex,
+		.mbr_ifindex = mbr->ifindex,
+		.enable = enable,
+	};
+
+	if (zclient_lag_mbfd_dist_set(g_zclient, bond->vrf->vrf_id, &dist) == ZCLIENT_SEND_FAILURE)
+		return -1;
+
+	return 0;
+}
+
+void sharp_zebra_lag_show(struct vty *vty, bool use_json)
+{
+	json_object *json = NULL, *jbonds = NULL, *jmbrs = NULL;
+	char buf[128];
+
+	if (use_json) {
+		json = json_object_new_object();
+		jbonds = json_object_new_object();
+		jmbrs = json_object_new_object();
+		json_object_object_add(json, "bonds", jbonds);
+		json_object_object_add(json, "members", jmbrs);
+	}
+
+	for (unsigned int i = 0; i < SHARP_LAG_MAX; i++) {
+		struct sharp_lag_bond *b = &sharp_lag_bonds[i];
+		struct interface *ifp;
+		const char *name;
+
+		if (!b->used)
+			continue;
+		ifp = sharp_lag_if_lookup(b->st.bond_ifindex);
+		name = ifp ? ifp->name : "?";
+		if (json) {
+			json_object *jb = json_object_new_object();
+
+			json_object_int_add(jb, "ifindex", b->st.bond_ifindex);
+			json_object_string_add(jb, "status",
+					       zapi_lag_bond_status2str(b->st.status));
+			json_object_int_add(jb, "mode", b->st.bond_mode);
+			json_object_int_add(jb, "memberCount", b->st.member_count);
+			json_object_int_add(jb, "messages", b->msgs);
+			json_object_object_add(jbonds, name, jb);
+		} else {
+			vty_out(vty, "bond %s(%u): status %s mode %u members %u (%u messages)\n",
+				name, b->st.bond_ifindex, zapi_lag_bond_status2str(b->st.status),
+				b->st.bond_mode, b->st.member_count, b->msgs);
+		}
+	}
+
+	for (unsigned int i = 0; i < SHARP_LAG_MBR_MAX; i++) {
+		struct sharp_lag_mbr *e = &sharp_lag_mbrs[i];
+
+		if (!e->used)
+			continue;
+		zapi_lag_mbr_flags2str(e->m.flags, buf, sizeof(buf));
+		if (json) {
+			json_object *jm = json_object_new_object();
+
+			json_object_int_add(jm, "ifindex", e->m.mbr_ifindex);
+			json_object_int_add(jm, "bondIfindex", e->m.bond_ifindex);
+			json_object_string_add(jm, "op", zapi_lag_mbr_op2str(e->m.op));
+			json_object_int_add(jm, "flagsValue", e->m.flags);
+			json_object_string_add(jm, "flags", buf);
+			json_object_int_add(jm, "adActorState", e->m.ad_actor_state);
+			json_object_string_addf(jm, "mac", "%02x:%02x:%02x:%02x:%02x:%02x",
+						e->m.mac[0], e->m.mac[1], e->m.mac[2], e->m.mac[3],
+						e->m.mac[4], e->m.mac[5]);
+			json_object_int_add(jm, "messages", e->msgs);
+			json_object_object_add(jmbrs, e->m.mbr_name, jm);
+		} else {
+			vty_out(vty,
+				"  member %s(%u) bond %u: %s, flags %s, ad 0x%02x (%u messages)\n",
+				e->m.mbr_name, e->m.mbr_ifindex, e->m.bond_ifindex,
+				zapi_lag_mbr_op2str(e->m.op), buf, e->m.ad_actor_state, e->msgs);
+		}
+	}
+
+	if (json)
+		vty_json(vty, json);
+}
+
 static zclient_handler *const sharp_handlers[] = {
 	[ZEBRA_INTERFACE_ADDRESS_ADD] = interface_address_add,
 	[ZEBRA_INTERFACE_ADDRESS_DELETE] = interface_address_delete,
@@ -1160,10 +1363,11 @@ static zclient_handler *const sharp_handlers[] = {
 	[ZEBRA_REDISTRIBUTE_ROUTE_DEL] = sharp_redistribute_route,
 	[ZEBRA_OPAQUE_MESSAGE] = sharp_opaque_handler,
 	[ZEBRA_OPAQUE_NOTIFY] = sharp_opq_notify_handler,
-	[ZEBRA_SRV6_MANAGER_GET_LOCATOR_CHUNK] =
-		sharp_zebra_process_srv6_locator_chunk,
+	[ZEBRA_SRV6_MANAGER_GET_LOCATOR_CHUNK] = sharp_zebra_process_srv6_locator_chunk,
 	[ZEBRA_NEIGH_ADDED] = sharp_zebra_process_neigh,
 	[ZEBRA_NEIGH_REMOVED] = sharp_zebra_process_neigh,
+	[ZEBRA_LAG_MBFD_BOND_STATUS] = sharp_lag_bond_status,
+	[ZEBRA_LAG_MBFD_MEMBER_UPDATE] = sharp_lag_member_update,
 };
 
 void sharp_zebra_init(void)

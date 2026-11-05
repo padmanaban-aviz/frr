@@ -73,4 +73,9 @@ extern int sharp_zebra_send_tc_filter_rate(struct interface *ifp,
 					   uint16_t dst_port, uint64_t rate);
 
 extern void sharp_zebra_register_neigh(vrf_id_t vrf_id, afi_t afi, bool reg);
+
+/* RFC 7130 micro-BFD bond member API (zebra test client) */
+extern int sharp_zebra_lag_register(struct interface *bond, bool reg, bool fail_open);
+extern int sharp_zebra_lag_dist_set(struct interface *bond, struct interface *mbr, bool enable);
+extern void sharp_zebra_lag_show(struct vty *vty, bool use_json);
 #endif

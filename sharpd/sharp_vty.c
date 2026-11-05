@@ -1551,6 +1551,67 @@ static struct interface *if_lookup_vrf_all(const char *ifname)
 	return NULL;
 }
 
+DEFPY (sharp_lag_mbfd_register,
+       sharp_lag_mbfd_register_cmd,
+       "[no$no] sharp lag-mbfd bond IFNAME$bond [fail-closed$fail_closed]",
+       NO_STR
+       SHARP_STR
+       "RFC 7130 micro-BFD bond member API\n"
+       "Register a bond with zebra\n"
+       "Bond interface name\n"
+       "Keep detached members out when sharpd goes away\n")
+{
+	struct interface *ifp = if_lookup_vrf_all(bond);
+
+	if (!ifp) {
+		vty_out(vty, "%% Can't find interface %s\n", bond);
+		return CMD_WARNING;
+	}
+
+	if (sharp_zebra_lag_register(ifp, !no, !fail_closed) != 0)
+		return CMD_WARNING;
+
+	return CMD_SUCCESS;
+}
+
+DEFPY (sharp_lag_mbfd_dist,
+       sharp_lag_mbfd_dist_cmd,
+       "sharp lag-mbfd bond IFNAME$bond member IFNAME$mbr <attach$attach|detach>",
+       SHARP_STR
+       "RFC 7130 micro-BFD bond member API\n"
+       "Bond\n"
+       "Bond interface name\n"
+       "Bond member\n"
+       "Member interface name\n"
+       "Put the member back into the bond\n"
+       "Take the member out of the bond\n")
+{
+	struct interface *bifp = if_lookup_vrf_all(bond);
+	struct interface *mifp = if_lookup_vrf_all(mbr);
+
+	if (!bifp || !mifp) {
+		vty_out(vty, "%% Can't find interface %s\n", !bifp ? bond : mbr);
+		return CMD_WARNING;
+	}
+
+	if (sharp_zebra_lag_dist_set(bifp, mifp, !!attach) != 0)
+		return CMD_WARNING;
+
+	return CMD_SUCCESS;
+}
+
+DEFPY (show_sharp_lag_mbfd,
+       show_sharp_lag_mbfd_cmd,
+       "show sharp lag-mbfd [json$json]",
+       SHOW_STR
+       SHARP_STR
+       "RFC 7130 micro-BFD bond member messages received from zebra\n"
+       JSON_STR)
+{
+	sharp_zebra_lag_show(vty, !!json);
+	return CMD_SUCCESS;
+}
+
 DEFPY (sharp_interface_protodown,
        sharp_interface_protodown_cmd,
        "sharp interface IFNAME$ifname protodown",
@@ -1749,6 +1810,9 @@ void sharp_vty_init(void)
 	install_element(ENABLE_NODE, &show_sharp_segment_routing_srv6_cmd);
 
 	install_element(ENABLE_NODE, &sharp_interface_protodown_cmd);
+	install_element(ENABLE_NODE, &sharp_lag_mbfd_register_cmd);
+	install_element(ENABLE_NODE, &sharp_lag_mbfd_dist_cmd);
+	install_element(ENABLE_NODE, &show_sharp_lag_mbfd_cmd);
 	install_element(ENABLE_NODE, &no_sharp_interface_protodown_cmd);
 
 	install_element(ENABLE_NODE, &tc_filter_rate_cmd);
