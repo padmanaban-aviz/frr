@@ -46,6 +46,7 @@
 #include "zebra/zebra_pbr.h"
 #include "zebra/zebra_tc.h"
 #include "zebra/table_manager.h"
+#include "zebra/zebra_mbfd.h"
 #include "zebra/zapi_msg.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/zebra_mlag.h"
@@ -3289,6 +3290,16 @@ stream_failure:
 	return;
 }
 
+static void zread_lag_mbfd_register(ZAPI_HANDLER_ARGS)
+{
+	zebra_mbfd_register(client, hdr, msg, zvrf);
+}
+
+static void zread_lag_mbfd_dist_set(ZAPI_HANDLER_ARGS)
+{
+	zebra_mbfd_dist_set(client, hdr, msg, zvrf);
+}
+
 static void zread_interface_set_master(ZAPI_HANDLER_ARGS)
 {
 	struct interface *master;
@@ -4183,6 +4194,9 @@ void (*const zserv_handlers[])(ZAPI_HANDLER_ARGS) = {
 	[ZEBRA_REMOTE_MACIP_DEL] = zebra_vxlan_remote_macip_del,
 	[ZEBRA_DUPLICATE_ADDR_DETECTION] = zebra_vxlan_dup_addr_detection,
 	[ZEBRA_INTERFACE_SET_MASTER] = zread_interface_set_master,
+	[ZEBRA_LAG_MBFD_REGISTER] = zread_lag_mbfd_register,
+	[ZEBRA_LAG_MBFD_UNREGISTER] = zread_lag_mbfd_register,
+	[ZEBRA_LAG_MBFD_DIST_SET] = zread_lag_mbfd_dist_set,
 	[ZEBRA_INTERFACE_SET_ARP] = zread_interface_set_arp,
 	[ZEBRA_PW_ADD] = zread_pseudowire,
 	[ZEBRA_PW_DELETE] = zread_pseudowire,

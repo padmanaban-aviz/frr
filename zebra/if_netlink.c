@@ -1407,6 +1407,8 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *ar
 	ns_id_t link_nsid = ns_id;
 	ifindex_t master_infindex = IFINDEX_INTERNAL;
 	uint8_t bypass = 0;
+	bool bond_mode_valid = false;
+	uint8_t bond_mode = 0;
 	bool ad_actor_state_valid = false;
 	uint8_t ad_actor_state = 0;
 	uint32_t txqlen = 0;
@@ -1488,6 +1490,17 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *ar
 			slave_kind = RTA_DATA(linkinfo[IFLA_INFO_SLAVE_KIND]);
 
 		netlink_determine_zebra_iftype(kind, &zif_type);
+
+		if (zif_type == ZEBRA_IF_BOND && linkinfo[IFLA_INFO_DATA]) {
+			struct rtattr *bondinfo[IFLA_BOND_MAX + 1];
+
+			netlink_parse_rtattr_nested(bondinfo, IFLA_BOND_MAX,
+						    linkinfo[IFLA_INFO_DATA]);
+			if (bondinfo[IFLA_BOND_MODE]) {
+				bond_mode = *(uint8_t *)RTA_DATA(bondinfo[IFLA_BOND_MODE]);
+				bond_mode_valid = true;
+			}
+		}
 	}
 
 	/* If linking to another interface, note it. */
@@ -1515,6 +1528,7 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *ar
 	dplane_ctx_set_ifp_family(ctx, ifi->ifi_family);
 	dplane_ctx_set_intf_txqlen(ctx, txqlen);
 	dplane_ctx_set_intf_carrier_changes(ctx, cchanges);
+	dplane_ctx_set_ifp_bond_mode(ctx, bond_mode_valid, bond_mode);
 
 	/* We are interested in some AF_BRIDGE notifications. */
 #ifndef AF_BRIDGE

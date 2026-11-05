@@ -35,6 +35,7 @@
 #include "zebra/debug.h"
 #include "zebra/router-id.h"
 #include "zebra/rtadv.h"
+#include "zebra/zebra_mbfd.h"
 #include "zebra/zebra_ptm.h"
 #include "zebra/zebra_ns.h"
 #include "zebra/redistribute.h"
@@ -223,6 +224,8 @@ static void sigint(void)
 void zebra_finalize(struct event *dummy)
 {
 	zlog_info("Zebra final shutdown");
+
+	zebra_mbfd_finish();
 
 	vrf_terminate();
 
@@ -527,6 +530,7 @@ int main(int argc, char **argv)
 /* PTM socket */
 #ifdef ZEBRA_PTM_SUPPORT
 	zebra_ptm_init();
+	zebra_mbfd_init();
 #endif
 
 	zebra_mpls_init();

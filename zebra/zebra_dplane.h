@@ -461,6 +461,9 @@ uint8_t dplane_ctx_get_ifp_bypass(const struct zebra_dplane_ctx *ctx);
 /* Bond member LACP actor operational state (802.3ad bonds only) */
 void dplane_ctx_set_ifp_ad_actor_state(struct zebra_dplane_ctx *ctx, bool valid, uint8_t state);
 bool dplane_ctx_get_ifp_ad_actor_state(const struct zebra_dplane_ctx *ctx, uint8_t *state);
+/* Bond mode (IFLA_BOND_MODE), bond interfaces only */
+void dplane_ctx_set_ifp_bond_mode(struct zebra_dplane_ctx *ctx, bool valid, uint8_t mode);
+bool dplane_ctx_get_ifp_bond_mode(const struct zebra_dplane_ctx *ctx, uint8_t *mode);
 void dplane_ctx_set_ifp_flags(struct zebra_dplane_ctx *ctx, uint64_t flags);
 uint64_t dplane_ctx_get_ifp_flags(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_set_ifp_change_flags(struct zebra_dplane_ctx *ctx, uint64_t change_flags);

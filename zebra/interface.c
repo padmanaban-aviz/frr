@@ -35,6 +35,7 @@
 #include "zebra/zebra_vxlan_if.h"
 #include "zebra/zebra_errors.h"
 #include "zebra/zebra_evpn_mh.h"
+#include "zebra/zebra_mbfd.h"
 #include "zebra/zebra_trace.h"
 #include "zebra/zebra_l2.h"
 #include "zebra/zebra_dplane.h"
@@ -263,6 +264,7 @@ static int if_zebra_delete_hook(struct interface *ifp)
 		XFREE(MTYPE_ZIF_DESC, zebra_if->desc);
 
 		event_cancel(&zebra_if->speed_update);
+		event_cancel(&zebra_if->mbfd.t_guard);
 
 		XFREE(MTYPE_ZINFO, zebra_if);
 	}
@@ -2029,6 +2031,8 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 
 		frrtrace(3, frr_zebra, if_dplane_ifp_handling, name, ifindex, 0);
 
+		zebra_mbfd_if_delete(ifp);
+
 		if (IS_ZEBRA_IF_BOND(ifp))
 			zebra_l2if_update_bond(ifp, false);
 		if (IS_ZEBRA_IF_BOND_SLAVE(ifp))
@@ -2056,6 +2060,8 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 		uint8_t bypass;
 		bool ad_actor_state_valid;
 		uint8_t ad_actor_state;
+		bool bond_mode_valid;
+		uint8_t bond_mode;
 		uint64_t flags;
 		uint32_t mtu;
 		ns_id_t link_nsid;
@@ -2082,6 +2088,7 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 		bond_ifindex = dplane_ctx_get_ifp_bond_ifindex(ctx);
 		bypass = dplane_ctx_get_ifp_bypass(ctx);
 		ad_actor_state_valid = dplane_ctx_get_ifp_ad_actor_state(ctx, &ad_actor_state);
+		bond_mode_valid = dplane_ctx_get_ifp_bond_mode(ctx, &bond_mode);
 		flags = dplane_ctx_get_ifp_flags(ctx);
 		mtu = dplane_ctx_get_ifp_mtu(ctx);
 		link_ifindex = dplane_ctx_get_ifp_link_ifindex(ctx);
@@ -2417,7 +2424,15 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 				zif->desc = XSTRDUP(MTYPE_ZIF_DESC, desc);
 
 			zif->carrier_changes = cchanges;
+
+			if (IS_ZEBRA_IF_BOND(ifp) && bond_mode_valid) {
+				zif->bond_info.mode_valid = true;
+				zif->bond_info.mode = bond_mode;
+			}
 		}
+
+		/* micro-BFD: bond / member state may have changed. */
+		zebra_mbfd_if_update(ifp);
 	}
 }
 
@@ -2479,6 +2494,9 @@ void zebra_if_dplane_result(struct zebra_dplane_ctx *ctx)
 			flog_err(EC_ZEBRA_INTF_UPDATE_FAILURE,
 				 "%s: interface %s(%u) master change failed", __func__,
 				 ifp ? ifp->name : dplane_ctx_get_ifname(ctx), ifindex);
+		if (ifp)
+			zebra_mbfd_dplane_result(ifp, dplane_ctx_intf_master_get_master(ctx, NULL),
+						 dp_res == ZEBRA_DPLANE_REQUEST_SUCCESS);
 	}
 }
 
@@ -3073,6 +3091,8 @@ static void if_dump_vty(struct vty *vty, struct interface *ifp)
 	if (zebra_if->flags & ZIF_FLAG_LACP_BYPASS)
 		vty_out(vty, "  LACP bypass: on\n");
 
+	zebra_mbfd_if_show(vty, NULL, ifp);
+
 	zebra_evpn_if_es_print(vty, NULL, zebra_if);
 	vty_out(vty, "  protodown: %s %s\n",
 		(ZEBRA_IF_IS_PROTODOWN(zebra_if)) ? "on" : "off",
@@ -3474,6 +3494,8 @@ static void if_dump_vty_json(struct vty *vty, struct interface *ifp,
 	json_object_boolean_add(
 		json_if, "lacpBypass",
 		CHECK_FLAG(zebra_if->flags, ZIF_FLAG_LACP_BYPASS));
+
+	zebra_mbfd_if_show(vty, json_if, ifp);
 
 	zebra_evpn_if_es_print(vty, json_if, zebra_if);
 

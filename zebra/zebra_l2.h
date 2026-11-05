@@ -35,6 +35,10 @@ struct zebra_l2info_brslave {
 
 struct zebra_l2info_bond {
 	struct list *mbr_zifs; /* slaves using this bond as a master */
+
+	/* Kernel bond mode (IFLA_BOND_MODE), when the kernel reported it */
+	bool mode_valid;
+	uint8_t mode;
 };
 
 struct zebra_l2_bridge_vlan {

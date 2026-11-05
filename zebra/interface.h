@@ -173,6 +173,21 @@ struct zebra_if {
 	struct zebra_l2info_bondslave bondslave_info;
 	struct zebra_l2info_bond bond_info;
 
+	/* RFC 7130 micro-BFD state of a bond member (zebra_mbfd.c) */
+	struct {
+		/* bond the member belongs to while micro-BFD keeps it detached */
+		ifindex_t home_bond;
+		uint8_t flags; /* ZEBRA_MBFD_F_* */
+		/* external re-enslave guard */
+		uint8_t guard_backoff;
+		struct event *t_guard;
+		/* last state reported to the client */
+		ifindex_t notified_bond;
+		uint16_t last_flags;
+		uint8_t last_ad_state;
+		uint8_t last_mac[ETH_ALEN];
+	} mbfd;
+
 	/* ethernet segment */
 	struct zebra_es_if_info es_info;
 

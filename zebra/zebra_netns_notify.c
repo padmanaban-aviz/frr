@@ -28,6 +28,7 @@
 #include "zebra_router.h"
 #endif /* defined(HAVE_NETLINK) */
 
+#include "zebra_mbfd.h"
 #include "zebra_netns_notify.h"
 #include "zebra_netns_id.h"
 #include "zebra_errors.h"
@@ -171,6 +172,7 @@ static int zebra_ns_delete(char *name)
 			if_down(ifp);
 		}
 
+		zebra_mbfd_if_delete(ifp);
 		if (IS_ZEBRA_IF_BOND(ifp))
 			zebra_l2if_update_bond(ifp, false);
 		if (IS_ZEBRA_IF_BOND_SLAVE(ifp))
