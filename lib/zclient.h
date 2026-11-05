@@ -238,6 +238,11 @@ typedef enum {
 	ZEBRA_TC_FILTER_DELETE,
 	ZEBRA_OPAQUE_NOTIFY,
 	ZEBRA_SRV6_SID_NOTIFY,
+	ZEBRA_LAG_MBFD_REGISTER,
+	ZEBRA_LAG_MBFD_UNREGISTER,
+	ZEBRA_LAG_MBFD_BOND_STATUS,
+	ZEBRA_LAG_MBFD_MEMBER_UPDATE,
+	ZEBRA_LAG_MBFD_DIST_SET,
 } zebra_message_types_t;
 /* Zebra message types. Please update the corresponding
  * command_types array with any changes!
@@ -1096,6 +1101,101 @@ extern enum zclient_send_status zclient_interface_set_arp(struct zclient *client
 extern enum zclient_send_status
 zclient_interface_set_master(struct zclient *client, struct interface *master,
 			     struct interface *slave);
+
+/*
+ * RFC 7130 micro-BFD: bond (LAG) member tracking and control.
+ *
+ * A client (bfdd) registers a bond with ZEBRA_LAG_MBFD_REGISTER. Zebra
+ * answers with ZEBRA_LAG_MBFD_BOND_STATUS and, when the bond is usable,
+ * sends one ZEBRA_LAG_MBFD_MEMBER_UPDATE per member, then one more on every
+ * member change. ZEBRA_LAG_MBFD_DIST_SET asks zebra to take a member out
+ * of the bond's distribution (detach) or put it back (attach).
+ * ZEBRA_LAG_MBFD_UNREGISTER, or the client going away, re-attaches the
+ * members the client detached, unless the bond was registered without
+ * ZAPI_LAG_REG_F_FAIL_OPEN.
+ *
+ * The ZAPI header's VRF is the bond's VRF.
+ */
+
+/* ZEBRA_LAG_MBFD_REGISTER / ZEBRA_LAG_MBFD_UNREGISTER (client -> zebra) */
+struct zapi_lag_register {
+	ifindex_t bond_ifindex;
+	uint8_t flags;
+};
+#define ZAPI_LAG_REG_F_FAIL_OPEN 0x01 /* re-attach members when the client goes away */
+
+/* ZEBRA_LAG_MBFD_BOND_STATUS (zebra -> client) */
+enum zapi_lag_bond_status_code {
+	ZAPI_LAG_BOND_OK = 0,		    /* usable; member updates follow */
+	ZAPI_LAG_BOND_NOT_FOUND = 1,	    /* no such bond (any more) */
+	ZAPI_LAG_BOND_UNSUPPORTED_MODE = 2, /* not 802.3ad or balance-xor */
+	ZAPI_LAG_BOND_EVPN_ES = 3,	    /* bond is an EVPN-MH Ethernet Segment */
+};
+
+struct zapi_lag_bond_status {
+	ifindex_t bond_ifindex;
+	uint8_t status;	      /* enum zapi_lag_bond_status_code */
+	uint8_t bond_mode;    /* kernel bond mode (0..6), ZAPI_LAG_BOND_MODE_UNKNOWN */
+	uint8_t member_count; /* members, attached or detached by micro-BFD */
+};
+#define ZAPI_LAG_BOND_MODE_UNKNOWN 0xff
+
+/* ZEBRA_LAG_MBFD_MEMBER_UPDATE (zebra -> client) */
+#define ZAPI_LAG_MBR_ADD    1 /* member joined the bond */
+#define ZAPI_LAG_MBR_UPDATE 2 /* member state changed */
+#define ZAPI_LAG_MBR_DEL    3 /* member left the bond for good */
+
+#define ZAPI_LAG_MBR_F_KERNEL_ATTACHED 0x0001 /* enslaved in the kernel */
+#define ZAPI_LAG_MBR_F_MBFD_DETACHED   0x0002 /* detached by micro-BFD (logical member) */
+#define ZAPI_LAG_MBR_F_PENDING	       0x0004 /* detach/attach not confirmed by the kernel yet */
+#define ZAPI_LAG_MBR_F_OPER_UP	       0x0008 /* operationally up (carrier) */
+#define ZAPI_LAG_MBR_F_ADMIN_UP	       0x0010 /* administratively up */
+#define ZAPI_LAG_MBR_F_PROTODOWN       0x0020 /* protodown */
+#define ZAPI_LAG_MBR_F_DISTRIBUTING    0x0040 /* carries the bond's traffic */
+#define ZAPI_LAG_MBR_F_AD_STATE_VALID  0x0080 /* ad_actor_state is meaningful */
+#define ZAPI_LAG_MBR_F_EXT_REENSLAVED  0x0100 /* re-enslaved by someone else */
+
+struct zapi_lag_member {
+	uint8_t op;
+	ifindex_t bond_ifindex;
+	ifindex_t mbr_ifindex;
+	char mbr_name[IFNAMSIZ];
+	uint8_t mac[ETH_ALEN];
+	uint16_t flags;
+	uint8_t ad_actor_state; /* IEEE 802.1AX actor state bits */
+};
+
+/* ZEBRA_LAG_MBFD_DIST_SET (client -> zebra) */
+struct zapi_lag_dist {
+	ifindex_t bond_ifindex;
+	ifindex_t mbr_ifindex;
+	uint8_t enable; /* 1 = attach (re-admit), 0 = detach */
+	uint8_t flags;
+};
+#define ZAPI_LAG_DIST_F_RESTORE_MAC 0x01 /* on detach, give the member the bond's MAC */
+
+extern int zapi_lag_register_encode(struct stream *s, uint16_t cmd, vrf_id_t vrf_id,
+				    const struct zapi_lag_register *reg);
+extern int zapi_lag_register_decode(struct stream *s, struct zapi_lag_register *reg);
+extern int zapi_lag_bond_status_encode(struct stream *s, vrf_id_t vrf_id,
+				       const struct zapi_lag_bond_status *st);
+extern int zapi_lag_bond_status_decode(struct stream *s, struct zapi_lag_bond_status *st);
+extern int zapi_lag_member_encode(struct stream *s, vrf_id_t vrf_id,
+				  const struct zapi_lag_member *mbr);
+extern int zapi_lag_member_decode(struct stream *s, struct zapi_lag_member *mbr);
+extern int zapi_lag_dist_encode(struct stream *s, vrf_id_t vrf_id,
+				const struct zapi_lag_dist *dist);
+extern int zapi_lag_dist_decode(struct stream *s, struct zapi_lag_dist *dist);
+
+extern enum zclient_send_status zclient_lag_mbfd_register(struct zclient *client, bool reg,
+							  vrf_id_t vrf_id, ifindex_t bond_ifindex,
+							  uint8_t flags);
+extern enum zclient_send_status zclient_lag_mbfd_dist_set(struct zclient *client, vrf_id_t vrf_id,
+							  const struct zapi_lag_dist *dist);
+
+extern const char *zapi_lag_bond_status2str(uint8_t status);
+extern const char *zapi_lag_mbr_op2str(uint8_t op);
+extern const char *zapi_lag_mbr_flags2str(uint16_t flags, char *buf, size_t len);
 extern struct interface *zebra_interface_state_read(struct stream *s, vrf_id_t);
 extern struct connected *zebra_interface_address_read(int type, struct stream *s,
 						      vrf_id_t vrf_id);

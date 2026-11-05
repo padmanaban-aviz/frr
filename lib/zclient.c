@@ -5086,6 +5086,193 @@ enum zclient_send_status zclient_interface_set_master(struct zclient *client,
 }
 
 /*
+ * RFC 7130 micro-BFD bond member messages (see zclient.h).
+ */
+int zapi_lag_register_encode(struct stream *s, uint16_t cmd, vrf_id_t vrf_id,
+			     const struct zapi_lag_register *reg)
+{
+	stream_reset(s);
+	zclient_create_header(s, cmd, vrf_id);
+	stream_putl(s, reg->bond_ifindex);
+	stream_putc(s, reg->flags);
+	stream_putw_at(s, 0, stream_get_endp(s));
+	return 0;
+}
+
+int zapi_lag_register_decode(struct stream *s, struct zapi_lag_register *reg)
+{
+	memset(reg, 0, sizeof(*reg));
+	STREAM_GETL(s, reg->bond_ifindex);
+	STREAM_GETC(s, reg->flags);
+	return 0;
+
+stream_failure:
+	return -1;
+}
+
+int zapi_lag_bond_status_encode(struct stream *s, vrf_id_t vrf_id,
+				const struct zapi_lag_bond_status *st)
+{
+	stream_reset(s);
+	zclient_create_header(s, ZEBRA_LAG_MBFD_BOND_STATUS, vrf_id);
+	stream_putl(s, st->bond_ifindex);
+	stream_putc(s, st->status);
+	stream_putc(s, st->bond_mode);
+	stream_putc(s, st->member_count);
+	stream_putw_at(s, 0, stream_get_endp(s));
+	return 0;
+}
+
+int zapi_lag_bond_status_decode(struct stream *s, struct zapi_lag_bond_status *st)
+{
+	memset(st, 0, sizeof(*st));
+	STREAM_GETL(s, st->bond_ifindex);
+	STREAM_GETC(s, st->status);
+	STREAM_GETC(s, st->bond_mode);
+	STREAM_GETC(s, st->member_count);
+	return 0;
+
+stream_failure:
+	return -1;
+}
+
+int zapi_lag_member_encode(struct stream *s, vrf_id_t vrf_id, const struct zapi_lag_member *mbr)
+{
+	stream_reset(s);
+	zclient_create_header(s, ZEBRA_LAG_MBFD_MEMBER_UPDATE, vrf_id);
+	stream_putc(s, mbr->op);
+	stream_putl(s, mbr->bond_ifindex);
+	stream_putl(s, mbr->mbr_ifindex);
+	stream_put(s, mbr->mbr_name, IFNAMSIZ);
+	stream_put(s, mbr->mac, ETH_ALEN);
+	stream_putw(s, mbr->flags);
+	stream_putc(s, mbr->ad_actor_state);
+	stream_putw_at(s, 0, stream_get_endp(s));
+	return 0;
+}
+
+int zapi_lag_member_decode(struct stream *s, struct zapi_lag_member *mbr)
+{
+	memset(mbr, 0, sizeof(*mbr));
+	STREAM_GETC(s, mbr->op);
+	STREAM_GETL(s, mbr->bond_ifindex);
+	STREAM_GETL(s, mbr->mbr_ifindex);
+	STREAM_GET(mbr->mbr_name, s, IFNAMSIZ);
+	mbr->mbr_name[IFNAMSIZ - 1] = '\0';
+	STREAM_GET(mbr->mac, s, ETH_ALEN);
+	STREAM_GETW(s, mbr->flags);
+	STREAM_GETC(s, mbr->ad_actor_state);
+	return 0;
+
+stream_failure:
+	return -1;
+}
+
+int zapi_lag_dist_encode(struct stream *s, vrf_id_t vrf_id, const struct zapi_lag_dist *dist)
+{
+	stream_reset(s);
+	zclient_create_header(s, ZEBRA_LAG_MBFD_DIST_SET, vrf_id);
+	stream_putl(s, dist->bond_ifindex);
+	stream_putl(s, dist->mbr_ifindex);
+	stream_putc(s, dist->enable);
+	stream_putc(s, dist->flags);
+	stream_putw_at(s, 0, stream_get_endp(s));
+	return 0;
+}
+
+int zapi_lag_dist_decode(struct stream *s, struct zapi_lag_dist *dist)
+{
+	memset(dist, 0, sizeof(*dist));
+	STREAM_GETL(s, dist->bond_ifindex);
+	STREAM_GETL(s, dist->mbr_ifindex);
+	STREAM_GETC(s, dist->enable);
+	STREAM_GETC(s, dist->flags);
+	return 0;
+
+stream_failure:
+	return -1;
+}
+
+enum zclient_send_status zclient_lag_mbfd_register(struct zclient *client, bool reg,
+						   vrf_id_t vrf_id, ifindex_t bond_ifindex,
+						   uint8_t flags)
+{
+	struct zapi_lag_register r = { .bond_ifindex = bond_ifindex, .flags = flags };
+
+	zapi_lag_register_encode(client->obuf,
+				 reg ? ZEBRA_LAG_MBFD_REGISTER : ZEBRA_LAG_MBFD_UNREGISTER, vrf_id,
+				 &r);
+	return zclient_send_message(client);
+}
+
+enum zclient_send_status zclient_lag_mbfd_dist_set(struct zclient *client, vrf_id_t vrf_id,
+						   const struct zapi_lag_dist *dist)
+{
+	zapi_lag_dist_encode(client->obuf, vrf_id, dist);
+	return zclient_send_message(client);
+}
+
+const char *zapi_lag_bond_status2str(uint8_t status)
+{
+	switch (status) {
+	case ZAPI_LAG_BOND_OK:
+		return "ok";
+	case ZAPI_LAG_BOND_NOT_FOUND:
+		return "not-found";
+	case ZAPI_LAG_BOND_UNSUPPORTED_MODE:
+		return "unsupported-mode";
+	case ZAPI_LAG_BOND_EVPN_ES:
+		return "evpn-es";
+	}
+	return "unknown";
+}
+
+const char *zapi_lag_mbr_op2str(uint8_t op)
+{
+	switch (op) {
+	case ZAPI_LAG_MBR_ADD:
+		return "add";
+	case ZAPI_LAG_MBR_UPDATE:
+		return "update";
+	case ZAPI_LAG_MBR_DEL:
+		return "delete";
+	}
+	return "unknown";
+}
+
+/* Render ZAPI_LAG_MBR_F_* as a comma separated list. */
+const char *zapi_lag_mbr_flags2str(uint16_t flags, char *buf, size_t len)
+{
+	static const struct {
+		uint16_t flag;
+		const char *name;
+	} names[] = {
+		{ ZAPI_LAG_MBR_F_KERNEL_ATTACHED, "attached" },
+		{ ZAPI_LAG_MBR_F_MBFD_DETACHED, "mbfd-detached" },
+		{ ZAPI_LAG_MBR_F_PENDING, "pending" },
+		{ ZAPI_LAG_MBR_F_OPER_UP, "oper-up" },
+		{ ZAPI_LAG_MBR_F_ADMIN_UP, "admin-up" },
+		{ ZAPI_LAG_MBR_F_PROTODOWN, "protodown" },
+		{ ZAPI_LAG_MBR_F_DISTRIBUTING, "distributing" },
+		{ ZAPI_LAG_MBR_F_AD_STATE_VALID, "ad-state-valid" },
+		{ ZAPI_LAG_MBR_F_EXT_REENSLAVED, "ext-reenslaved" },
+	};
+	size_t pos = 0;
+
+	if (len == 0)
+		return buf;
+	buf[0] = '\0';
+
+	for (unsigned int i = 0; i < array_size(names) && pos < len; i++) {
+		if (!CHECK_FLAG(flags, names[i].flag))
+			continue;
+		pos += snprintf(buf + pos, len - pos, "%s%s", pos ? "," : "", names[i].name);
+	}
+
+	return buf;
+}
+
+/*
  * Send capabilities message to zebra
  */
 enum zclient_send_status zclient_capabilities_send(uint32_t cmd,
