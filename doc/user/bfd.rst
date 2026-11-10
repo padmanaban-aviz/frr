@@ -843,17 +843,18 @@ You can also clear packet counters per session with the following commands, only
 Micro-BFD on LAG members (RFC 7130)
 ===================================
 
-Micro-BFD runs one BFD session on every member link of a link aggregation
-group (a Linux bond), as RFC 7130 describes. A member carries the bond's
-traffic only while its session is Up: when the session fails, ``bfdd`` asks
-``zebra`` to take the member out of the bond, and to put it back once the
-session is Up again. This catches failures the bond itself doesn't see, such
+Micro-BFD runs a BFD session on every member link of a link aggregation
+group (a Linux bond), as RFC 7130 describes: one per configured address
+family, IPv4 and IPv6. A member carries the bond's traffic only while its
+sessions are Up: when one fails, ``bfdd`` asks ``zebra`` to take the member
+out of the bond, and to put it back once they are all Up again. This catches failures the bond itself doesn't see, such
 as a link that forwards in one direction only, or a peer that still answers
 LACP but no longer forwards.
 
 Packets are sent and received directly on each member link: UDP destination
-port 6784, IP TTL 255, Ethernet destination ``01:00:5e:90:00:01``, between the
-two bonds' IP addresses. The sessions run in Asynchronous mode only (RFC 7130,
+port 6784, IPv4 TTL or IPv6 hop limit 255, Ethernet destination
+``01:00:5e:90:00:01`` in both families, between the two bonds' IP addresses.
+IPv6 packets with extension headers are not accepted. The sessions run in Asynchronous mode only (RFC 7130,
 Section 2.2): they advertise a Required Min Echo RX Interval of zero, and echo,
 demand and passive settings of the profile don't apply to them.
 
@@ -861,7 +862,12 @@ Requirements and limits:
 
 - Linux, with the bonding driver. The bond must be in ``802.3ad`` or
   ``balance-xor`` mode; other modes are refused.
-- The bond needs an IPv4 address (or set ``source-addr``). IPv4 only for now.
+- The bond needs an address of each configured family (or set
+  ``source-addr``). For IPv6 it takes the bond's first global address;
+  link-local addresses are not used, neither as source nor as destination.
+- A configured family that can't run (no address on the bond) is left out:
+  members are judged on the other family alone. ``show bfd lag`` says why,
+  and ``bfdd`` logs a warning once.
 - A bond that is an EVPN Ethernet Segment is refused.
 - Micro-BFD sessions always run in ``bfdd``, also with
   :option:`--dplaneaddr`.
@@ -881,15 +887,18 @@ Strict mode, the only mode for now, works like this for every member:
 - A new session (configuration, ``bfdd`` start, a new member, ``no shutdown``)
   gets ``enable-grace`` milliseconds to come Up before its member is taken
   out.
-- Session Down: the member is taken out of the bond. Putting it back later
+- A session Down (any family): the member is taken out of the bond. Putting it back later
   needs the member link down for a moment (the bonding driver requires it), so
   the link bounces on both ends.
-- Session Up while the member is out: after ``hold-up`` milliseconds, the
-  member is put back. Session Down is then ignored until the member carries
-  traffic again with its session Up, for at most 10 seconds.
+- All sessions Up while the member is out: after ``hold-up`` milliseconds,
+  the member is put back. Session Down is then ignored until the member
+  carries traffic again with its sessions Up, for at most 10 seconds.
 - A member that is protodown is left alone.
 - ``shutdown``, or a peer signalling AdminDown, is not a failure (RFC 5882):
-  members stay in, or are put back into, the bond.
+  members stay in, or are put back into, the bond. A family whose peer
+  signals AdminDown is left out of the decision. A session that ``bfdd``
+  deletes (configuration removed, address gone) tells its peer AdminDown
+  first.
 - When ``bfdd`` stops, or the ``lag`` configuration is removed, ``zebra`` puts
   the members ``bfdd`` took out back into the bond.
 
@@ -902,6 +911,13 @@ Strict mode, the only mode for now, works like this for every member:
 
    Run IPv4 micro-BFD sessions to the peer's bond address ``dest-addr``.
    ``source-addr`` defaults to the primary IPv4 address of the bond.
+
+.. clicmd:: ipv6 dest-addr X:X::X:X [source-addr X:X::X:X]
+
+   Run IPv6 micro-BFD sessions to the peer's bond address ``dest-addr``, a
+   global address. ``source-addr`` defaults to the first global IPv6 address
+   of the bond. With IPv4 sessions too, a member carries traffic only while
+   both of its sessions are Up.
 
 ``profile BFDPROF``
    Take the timers, the detection multiplier and the authentication settings
@@ -923,8 +939,8 @@ Strict mode, the only mode for now, works like this for every member:
    while the sessions are disabled.
 
 The configuration follows the ``ietf-bfd-lag`` YANG module (RFC 9314) where
-the two overlap: ``lag-name``, ``ipv4-dest-addr``, ``use-ipv4`` and
-``admin-down`` (``shutdown``).
+the two overlap: ``lag-name``, ``use-ipv4``, ``ipv4-dest-addr``,
+``use-ipv6``, ``ipv6-dest-addr`` and ``admin-down`` (``shutdown``).
 
 Example, on both ends of the bond (with the addresses swapped on the other
 one):
@@ -933,6 +949,7 @@ one):
 
    interface bond0
     ip address 10.0.40.1/30
+    ipv6 address 2001:db8:40::1/64
    !
    bfd
     profile lag
@@ -941,6 +958,7 @@ one):
     !
     lag bond0
      ipv4 dest-addr 10.0.40.2
+     ipv6 dest-addr 2001:db8:40::2
      profile lag
     exit
    !
@@ -948,13 +966,13 @@ one):
 .. clicmd:: show bfd lag [IFNAME] [json]
 
    Show the bond status as ``zebra`` reports it, and for every member its
-   session, whether it is in or out of the bond and why, and packet counters.
+   sessions, whether it is in or out of the bond and why, and packet counters.
    The sessions also appear in ``show bfd peers``, with
    ``bfd-mode micro-bfd`` and ``bfd-name lag:IFNAME``.
 
 .. clicmd:: show bfd lag statistics [json]
 
-   Show the number of micro-BFD sessions by state.
+   Show the number of micro-BFD sessions by state, per address family.
 
 .. clicmd:: debug bfd lag
 
