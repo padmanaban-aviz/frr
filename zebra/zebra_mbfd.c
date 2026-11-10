@@ -96,6 +96,11 @@ static unsigned int state_read_tries;
 #define MBFD_STATE_READ_DELAY	5 /* seconds after startup */
 #define MBFD_STATE_READ_RETRIES 6
 
+/* LACP actor state poll of registered bonds' members (ms), see below. */
+#define MBFD_AD_POLL_MS 1000
+static struct event *t_ad_poll;
+static void mbfd_ad_poll_schedule(void);
+
 static void mbfd_state_write(void);
 static void mbfd_guard_cb(struct event *t);
 
@@ -542,6 +547,80 @@ static void mbfd_member_kernel_change(struct interface *ifp)
 }
 
 /*
+ * LACP actor state poll.
+ *
+ * The kernel reports a member's LACP actor state with RTM_NEWLINK, but not
+ * every change: when a member that stayed in its aggregator goes back to
+ * Collecting/Distributing after its partner returns, nothing may be sent,
+ * and zebra keeps reporting it not distributing. While a client watches a
+ * bond, read the attached members' state from sysfs every second and
+ * report changes the kernel didn't. Linux only, and only in zebra's own
+ * network namespace (sysfs shows that one).
+ */
+static bool mbfd_ad_state_read(const struct interface *ifp, uint8_t *state)
+{
+#ifdef GNU_LINUX
+	char path[128], buf[16];
+	unsigned int val;
+	bool ok;
+	FILE *fp;
+
+	snprintf(path, sizeof(path), "/sys/class/net/%s/bonding_slave/ad_actor_oper_port_state",
+		 ifp->name);
+	fp = fopen(path, "r");
+	if (!fp)
+		return false;
+	ok = fgets(buf, sizeof(buf), fp) && sscanf(buf, "%u", &val) == 1 && val <= UINT8_MAX;
+	fclose(fp);
+	if (ok)
+		*state = val;
+	return ok;
+#else
+	return false;
+#endif
+}
+
+static void mbfd_ad_poll_member(struct interface *ifp, void *arg)
+{
+	struct zebra_if *zif = ifp->info;
+	ifindex_t bond = mbfd_kernel_bond(ifp);
+	uint8_t state;
+
+	if (bond == IFINDEX_INTERNAL || !zif->bondslave_info.ad_actor_state_valid)
+		return;
+	if (!mbfd_reg_find(mbfd_if_zns(ifp), bond))
+		return;
+	if (!mbfd_ad_state_read(ifp, &state) || state == zif->bondslave_info.ad_actor_oper_state)
+		return;
+
+	if (IS_ZEBRA_DEBUG_EVENT)
+		zlog_debug("micro-BFD: %s LACP actor state 0x%02x -> 0x%02x (not reported by the kernel)",
+			   ifp->name, zif->bondslave_info.ad_actor_oper_state, state);
+
+	zif->bondslave_info.ad_actor_oper_state = state;
+	zebra_mbfd_if_update(ifp);
+}
+
+static void mbfd_ad_poll_cb(struct event *t)
+{
+	struct zebra_ns *zns = zebra_ns_lookup(NS_DEFAULT);
+
+	if (mbfd_regs_count(&mbfd_regs) == 0)
+		return;
+
+	if (zns)
+		mbfd_if_walk(zns, mbfd_ad_poll_member, NULL);
+	mbfd_ad_poll_schedule();
+}
+
+static void mbfd_ad_poll_schedule(void)
+{
+	if (!event_is_scheduled(t_ad_poll))
+		event_add_timer_msec(zrouter.master, mbfd_ad_poll_cb, NULL, MBFD_AD_POLL_MS,
+				     &t_ad_poll);
+}
+
+/*
  * Kernel interface events
  */
 void zebra_mbfd_if_update(struct interface *ifp)
@@ -732,6 +811,7 @@ void zebra_mbfd_register(struct zserv *client, struct zmsghdr *hdr, struct strea
 		reg->zns = zns;
 		reg->bond_ifindex = zreg.bond_ifindex;
 		mbfd_regs_add_tail(&mbfd_regs, reg);
+		mbfd_ad_poll_schedule();
 	} else if (reg->client && reg->client != client) {
 		zlog_warn("micro-BFD: bond ifindex %u registered by %s, taking over from %s",
 			  zreg.bond_ifindex, zebra_route_string(client->proto),
@@ -1104,6 +1184,7 @@ void zebra_mbfd_finish(void)
 	struct mbfd_saved *sv;
 
 	event_cancel(&t_state_read);
+	event_cancel(&t_ad_poll);
 	while ((sv = mbfd_saved_pop(&mbfd_saved)))
 		XFREE(MTYPE_ZEBRA_MBFD_SAVED, sv);
 	mbfd_saved_fini(&mbfd_saved);
