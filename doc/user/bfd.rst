@@ -838,6 +838,130 @@ You can also clear packet counters per session with the following commands, only
                 Rx fail packet: 0
 
 
+.. _bfd-micro-bfd:
+
+Micro-BFD on LAG members (RFC 7130)
+===================================
+
+Micro-BFD runs one BFD session on every member link of a link aggregation
+group (a Linux bond), as RFC 7130 describes. A member carries the bond's
+traffic only while its session is Up: when the session fails, ``bfdd`` asks
+``zebra`` to take the member out of the bond, and to put it back once the
+session is Up again. This catches failures the bond itself doesn't see, such
+as a link that forwards in one direction only, or a peer that still answers
+LACP but no longer forwards.
+
+Packets are sent and received directly on each member link: UDP destination
+port 6784, IP TTL 255, Ethernet destination ``01:00:5e:90:00:01``, between the
+two bonds' IP addresses. The sessions run in Asynchronous mode only (RFC 7130,
+Section 2.2): they advertise a Required Min Echo RX Interval of zero, and echo,
+demand and passive settings of the profile don't apply to them.
+
+Requirements and limits:
+
+- Linux, with the bonding driver. The bond must be in ``802.3ad`` or
+  ``balance-xor`` mode; other modes are refused.
+- The bond needs an IPv4 address (or set ``source-addr``). IPv4 only for now.
+- A bond that is an EVPN Ethernet Segment is refused.
+- Micro-BFD sessions always run in ``bfdd``, also with
+  :option:`--dplaneaddr`.
+- Nothing else should put a member back into its bond while micro-BFD keeps
+  it out. Exclude the members from NetworkManager, systemd-networkd or
+  ifupdown; ``zebra`` releases a member put back by someone else again, with
+  a growing delay, and logs a warning.
+- A member taken out of the bond keeps its own MAC address. The bond takes the
+  MAC address of its first member unless it has one of its own, so give the
+  bond its own MAC address (``ip link set bond0 address ...``) to avoid two
+  links with the same address.
+- With fast timers, software BFD can see false failures under load.
+  ``show bfd lag`` warns when the detection time is below 150 milliseconds.
+
+Strict mode, the only mode for now, works like this for every member:
+
+- A new session (configuration, ``bfdd`` start, a new member, ``no shutdown``)
+  gets ``enable-grace`` milliseconds to come Up before its member is taken
+  out.
+- Session Down: the member is taken out of the bond. Putting it back later
+  needs the member link down for a moment (the bonding driver requires it), so
+  the link bounces on both ends.
+- Session Up while the member is out: after ``hold-up`` milliseconds, the
+  member is put back. Session Down is then ignored until the member carries
+  traffic again with its session Up, for at most 10 seconds.
+- A member that is protodown is left alone.
+- ``shutdown``, or a peer signalling AdminDown, is not a failure (RFC 5882):
+  members stay in, or are put back into, the bond.
+- When ``bfdd`` stops, or the ``lag`` configuration is removed, ``zebra`` puts
+  the members ``bfdd`` took out back into the bond.
+
+.. clicmd:: lag IFNAME
+
+   Configure micro-BFD on the bond ``IFNAME``, and enter its configuration
+   node. The bond doesn't need to exist yet.
+
+.. clicmd:: ipv4 dest-addr A.B.C.D [source-addr A.B.C.D]
+
+   Run IPv4 micro-BFD sessions to the peer's bond address ``dest-addr``.
+   ``source-addr`` defaults to the primary IPv4 address of the bond.
+
+``profile BFDPROF``
+   Take the timers, the detection multiplier and the authentication settings
+   from the profile (see :clicmd:`profile BFDPROF`). Without a profile, the
+   defaults apply (300 milliseconds, multiplier 3).
+
+.. clicmd:: enable-grace (0-60000)
+
+   Time, in milliseconds, a new session gets to come Up before its member is
+   taken out of the bond. Default 3000.
+
+.. clicmd:: hold-up (0-60000)
+
+   Time, in milliseconds, a session must stay Up before its member is put back
+   into the bond. Keep it below 10 seconds. Default 0.
+
+``shutdown``
+   Disable the sessions (AdminDown). Members are not kept out of the bond
+   while the sessions are disabled.
+
+The configuration follows the ``ietf-bfd-lag`` YANG module (RFC 9314) where
+the two overlap: ``lag-name``, ``ipv4-dest-addr``, ``use-ipv4`` and
+``admin-down`` (``shutdown``).
+
+Example, on both ends of the bond (with the addresses swapped on the other
+one):
+
+::
+
+   interface bond0
+    ip address 10.0.40.1/30
+   !
+   bfd
+    profile lag
+     receive-interval 100
+     transmit-interval 100
+    !
+    lag bond0
+     ipv4 dest-addr 10.0.40.2
+     profile lag
+    exit
+   !
+
+.. clicmd:: show bfd lag [IFNAME] [json]
+
+   Show the bond status as ``zebra`` reports it, and for every member its
+   session, whether it is in or out of the bond and why, and packet counters.
+   The sessions also appear in ``show bfd peers``, with
+   ``bfd-mode micro-bfd`` and ``bfd-name lag:IFNAME``.
+
+.. clicmd:: show bfd lag statistics [json]
+
+   Show the number of micro-BFD sessions by state.
+
+.. clicmd:: debug bfd lag
+
+   Show micro-BFD decisions: sessions created and deleted, members taken out
+   and put back, and the bond and member state ``zebra`` reports.
+
+
 .. _bfd-distributed:
 
 Distributed BFD
