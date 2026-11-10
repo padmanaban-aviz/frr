@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * BFD raw frame builder.
+ * BFD raw frame builder and parser.
  *
  * Copyright (C) 2026 Aviz Networks
  */
@@ -21,6 +21,11 @@ static inline void put16(uint8_t *p, uint16_t v)
 {
 	p[0] = v >> 8;
 	p[1] = v & 0xff;
+}
+
+static inline uint16_t get16(const uint8_t *p)
+{
+	return (uint16_t)(p[0] << 8 | p[1]);
 }
 
 /* RFC 768: a computed checksum of zero is transmitted as all ones. */
@@ -116,4 +121,119 @@ ssize_t bfd_frame_build(uint8_t *buf, size_t buflen, const struct bfd_frame_para
 	memcpy(udp + 6, &sum, sizeof(sum));
 
 	return total;
+}
+
+int bfd_frame_parse(const uint8_t *buf, size_t len, struct bfd_frame_info *info)
+{
+	const uint8_t *ip, *udp;
+	size_t iplen, iphlen, udplen;
+	uint16_t ethertype;
+
+	if (buf == NULL || info == NULL)
+		return BFD_FRAME_ESHORT;
+	if (len < BFD_FRAME_ETH_HLEN)
+		return BFD_FRAME_ESHORT;
+
+	memset(info, 0, sizeof(*info));
+	memcpy(info->dmac, buf, BFD_FRAME_MAC_LEN);
+	memcpy(info->smac, buf + BFD_FRAME_MAC_LEN, BFD_FRAME_MAC_LEN);
+	ethertype = get16(buf + 2 * BFD_FRAME_MAC_LEN);
+
+	ip = buf + BFD_FRAME_ETH_HLEN;
+	iplen = len - BFD_FRAME_ETH_HLEN;
+
+	switch (ethertype) {
+	case BFD_FRAME_ETHERTYPE_IPV4: {
+		uint16_t totlen;
+
+		if (iplen < BFD_FRAME_IPV4_HLEN)
+			return BFD_FRAME_ESHORT;
+		if ((ip[0] >> 4) != 4)
+			return BFD_FRAME_EBADHDR;
+		iphlen = (size_t)(ip[0] & 0x0f) * 4;
+		if (iphlen < BFD_FRAME_IPV4_HLEN)
+			return BFD_FRAME_EBADHDR;
+		if (iplen < iphlen)
+			return BFD_FRAME_ESHORT;
+		totlen = get16(ip + 2);
+		if (totlen < iphlen)
+			return BFD_FRAME_EBADHDR;
+		if (totlen > iplen)
+			return BFD_FRAME_ESHORT;
+		/* Drop the Ethernet padding. */
+		iplen = totlen;
+		/* More fragments, or a fragment offset. */
+		if (get16(ip + 6) & 0x3fff)
+			return BFD_FRAME_EFRAG;
+		if (ip[9] != IPPROTO_UDP)
+			return BFD_FRAME_ENOTUDP;
+		if (in_cksum(ip, iphlen) != 0)
+			return BFD_FRAME_ECKSUM;
+
+		info->family = AF_INET;
+		info->ttl = ip[8];
+		memcpy(&info->src.v4, ip + 12, 4);
+		memcpy(&info->dst.v4, ip + 16, 4);
+		break;
+	}
+	case BFD_FRAME_ETHERTYPE_IPV6: {
+		uint16_t paylen;
+
+		if (iplen < BFD_FRAME_IPV6_HLEN)
+			return BFD_FRAME_ESHORT;
+		if ((ip[0] >> 4) != 6)
+			return BFD_FRAME_EBADHDR;
+		iphlen = BFD_FRAME_IPV6_HLEN;
+		paylen = get16(ip + 4);
+		if (paylen > iplen - iphlen)
+			return BFD_FRAME_ESHORT;
+		iplen = iphlen + paylen;
+		if (ip[6] != IPPROTO_UDP)
+			return BFD_FRAME_ENOTUDP;
+
+		info->family = AF_INET6;
+		info->ttl = ip[7];
+		memcpy(&info->src.v6, ip + 8, 16);
+		memcpy(&info->dst.v6, ip + 24, 16);
+		break;
+	}
+	default:
+		return BFD_FRAME_ENOTIP;
+	}
+
+	udp = ip + iphlen;
+	if (iplen - iphlen < BFD_FRAME_UDP_HLEN)
+		return BFD_FRAME_ESHORT;
+	udplen = get16(udp + 4);
+	if (udplen < BFD_FRAME_UDP_HLEN || udplen > iplen - iphlen)
+		return BFD_FRAME_EBADHDR;
+
+	info->sport = get16(udp);
+	info->dport = get16(udp + 2);
+	info->payload = udp + BFD_FRAME_UDP_HLEN;
+	info->plen = udplen - BFD_FRAME_UDP_HLEN;
+
+	return BFD_FRAME_OK;
+}
+
+const char *bfd_frame_parse_strerror(int result)
+{
+	switch (result) {
+	case BFD_FRAME_OK:
+		return "ok";
+	case BFD_FRAME_ESHORT:
+		return "truncated frame";
+	case BFD_FRAME_ENOTIP:
+		return "not untagged IP";
+	case BFD_FRAME_ENOTUDP:
+		return "not UDP";
+	case BFD_FRAME_EFRAG:
+		return "IP fragment";
+	case BFD_FRAME_EBADHDR:
+		return "bad IP or UDP header";
+	case BFD_FRAME_ECKSUM:
+		return "bad IPv4 header checksum";
+	}
+
+	return "unknown";
 }

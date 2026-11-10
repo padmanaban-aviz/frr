@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-or-later
 /*
- * Unit tests for the BFD raw frame builder (bfdd/bfd_frame.c).
+ * Unit tests for the BFD raw frame builder and parser (bfdd/bfd_frame.c).
  *
  * Copyright (C) 2026 Aviz Networks
  */
@@ -288,6 +288,210 @@ static void test_echo_equivalence(void)
 }
 #endif
 
+
+/* Re-compute the IPv4 header checksum after editing the header. */
+static void ip4_fix_cksum(uint8_t *ip)
+{
+	uint16_t sum;
+
+	ip[10] = ip[11] = 0;
+	sum = in_cksum(ip, (ip[0] & 0x0f) * 4);
+	memcpy(ip + 10, &sum, sizeof(sum));
+}
+
+/* TC-7: parsing a built frame gives back every field (IPv4 and IPv6). */
+static void test_parse_round_trip(void)
+{
+	static const uint8_t payload[24] = { 0x20, 0xc0, 3, 24, 1, 2, 3, 4 };
+	struct bfd_frame_params fp;
+	struct bfd_frame_info fi;
+	uint8_t buf[128] __attribute__((aligned(8)));
+	ssize_t len;
+
+	params_v4(&fp);
+	len = bfd_frame_build(buf, sizeof(buf), &fp, payload, sizeof(payload));
+	CHECK(len > 0);
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_OK);
+	CHECK(fi.family == AF_INET);
+	CHECK(memcmp(fi.smac, fp.smac, 6) == 0 && memcmp(fi.dmac, fp.dmac, 6) == 0);
+	CHECK(fi.src.v4.s_addr == fp.src.v4.s_addr && fi.dst.v4.s_addr == fp.dst.v4.s_addr);
+	CHECK(fi.sport == 49152 && fi.dport == 6784 && fi.ttl == 255);
+	CHECK(fi.plen == sizeof(payload) && memcmp(fi.payload, payload, sizeof(payload)) == 0);
+	CHECK(fi.payload == buf + ETH_HLEN_ + IP4_HLEN + UDP_HLEN);
+
+	params_v6(&fp);
+	fp.ttl = 254;
+	len = bfd_frame_build(buf, sizeof(buf), &fp, payload, sizeof(payload));
+	CHECK(len > 0);
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_OK);
+	CHECK(fi.family == AF_INET6 && fi.ttl == 254);
+	CHECK(memcmp(&fi.src.v6, &fp.src.v6, 16) == 0 && memcmp(&fi.dst.v6, &fp.dst.v6, 16) == 0);
+	CHECK(fi.sport == 49152 && fi.dport == 6784);
+	CHECK(fi.plen == sizeof(payload) && memcmp(fi.payload, payload, sizeof(payload)) == 0);
+}
+
+/* TC-8: Ethernet padding after the IP packet is ignored. */
+static void test_parse_padding(void)
+{
+	static const uint8_t payload[4] = { 1, 2, 3, 4 };
+	struct bfd_frame_params fp;
+	struct bfd_frame_info fi;
+	uint8_t buf[128] __attribute__((aligned(8)));
+	ssize_t len;
+
+	params_v4(&fp);
+	len = bfd_frame_build(buf, sizeof(buf), &fp, payload, sizeof(payload));
+	CHECK(len == ETH_HLEN_ + IP4_HLEN + UDP_HLEN + 4);
+	/* Pad to the 60 byte Ethernet minimum with junk. */
+	memset(buf + len, 0xee, 60 - len);
+	CHECK(bfd_frame_parse(buf, 60, &fi) == BFD_FRAME_OK);
+	CHECK(fi.plen == sizeof(payload));
+
+	params_v6(&fp);
+	len = bfd_frame_build(buf, sizeof(buf), &fp, payload, sizeof(payload));
+	memset(buf + len, 0xee, 8);
+	CHECK(bfd_frame_parse(buf, len + 8, &fi) == BFD_FRAME_OK);
+	CHECK(fi.plen == sizeof(payload));
+}
+
+/* TC-9: every truncation is refused cleanly. */
+static void test_parse_truncated(void)
+{
+	static const uint8_t payload[24] = { 0 };
+	struct bfd_frame_params fp;
+	struct bfd_frame_info fi;
+	uint8_t buf[128] __attribute__((aligned(8)));
+	ssize_t len;
+
+	CHECK(bfd_frame_parse(NULL, 64, &fi) != BFD_FRAME_OK);
+
+	params_v4(&fp);
+	len = bfd_frame_build(buf, sizeof(buf), &fp, payload, sizeof(payload));
+	for (ssize_t i = 0; i < len; i++)
+		CHECK(bfd_frame_parse(buf, i, &fi) == BFD_FRAME_ESHORT);
+
+	params_v6(&fp);
+	len = bfd_frame_build(buf, sizeof(buf), &fp, payload, sizeof(payload));
+	for (ssize_t i = 0; i < len; i++)
+		CHECK(bfd_frame_parse(buf, i, &fi) == BFD_FRAME_ESHORT);
+}
+
+/* TC-10: frames that are not untagged IP/UDP, fragments, bad headers. */
+static void test_parse_rejects(void)
+{
+	static const uint8_t payload[24] = { 0 };
+	struct bfd_frame_params fp;
+	struct bfd_frame_info fi;
+	uint8_t buf[128] __attribute__((aligned(8)));
+	uint8_t *ip = buf + ETH_HLEN_;
+	ssize_t len;
+
+	params_v4(&fp);
+#define REBUILD() (len = bfd_frame_build(buf, sizeof(buf), &fp, payload, sizeof(payload)))
+
+	/* VLAN tagged (802.1Q), ARP. */
+	REBUILD();
+	buf[12] = 0x81;
+	buf[13] = 0x00;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_ENOTIP);
+	buf[12] = 0x08;
+	buf[13] = 0x06;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_ENOTIP);
+
+	/* Not UDP. */
+	REBUILD();
+	ip[9] = IPPROTO_TCP;
+	ip4_fix_cksum(ip);
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_ENOTUDP);
+
+	/* Fragments: more-fragments flag, then an offset. */
+	REBUILD();
+	ip[6] = 0x20;
+	ip4_fix_cksum(ip);
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EFRAG);
+	REBUILD();
+	ip[7] = 0x01;
+	ip4_fix_cksum(ip);
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EFRAG);
+	/* Don't-fragment alone is fine. */
+	REBUILD();
+	ip[6] = 0x40;
+	ip4_fix_cksum(ip);
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_OK);
+
+	/* Bad IPv4 header checksum. */
+	REBUILD();
+	ip[10] ^= 0xff;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_ECKSUM);
+
+	/* Wrong version, header length below 20, total length below it. */
+	REBUILD();
+	ip[0] = 0x65;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EBADHDR);
+	REBUILD();
+	ip[0] = 0x44;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EBADHDR);
+	REBUILD();
+	ip[2] = 0;
+	ip[3] = 10;
+	ip4_fix_cksum(ip);
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EBADHDR);
+
+	/* UDP length below 8 or past the IP packet. */
+	REBUILD();
+	ip[IP4_HLEN + 4] = 0;
+	ip[IP4_HLEN + 5] = 4;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EBADHDR);
+	REBUILD();
+	ip[IP4_HLEN + 5] += 1;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EBADHDR);
+
+	/* IPv6: next header not UDP. */
+	params_v6(&fp);
+	REBUILD();
+	ip[6] = 0; /* hop-by-hop options */
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_ENOTUDP);
+	REBUILD();
+	ip[0] = 0x40;
+	CHECK(bfd_frame_parse(buf, len, &fi) == BFD_FRAME_EBADHDR);
+#undef REBUILD
+
+	for (int r = BFD_FRAME_ECKSUM; r <= BFD_FRAME_OK; r++)
+		CHECK(strcmp(bfd_frame_parse_strerror(r), "unknown") != 0);
+	CHECK(strcmp(bfd_frame_parse_strerror(-100), "unknown") == 0);
+}
+
+/* TC-11: IPv4 header options are skipped. */
+static void test_parse_ip4_options(void)
+{
+	static const uint8_t payload[24] = { 0x20 };
+	struct bfd_frame_params fp;
+	struct bfd_frame_info fi;
+	uint8_t built[128] __attribute__((aligned(8)));
+	uint8_t buf[128] __attribute__((aligned(8)));
+	uint8_t *ip = buf + ETH_HLEN_;
+	ssize_t len;
+	uint16_t tot;
+
+	params_v4(&fp);
+	len = bfd_frame_build(built, sizeof(built), &fp, payload, sizeof(payload));
+
+	/* Insert 4 bytes of options (NOPs) after the 20 byte header. */
+	memcpy(buf, built, ETH_HLEN_ + IP4_HLEN);
+	memset(buf + ETH_HLEN_ + IP4_HLEN, 0x01, 4);
+	memcpy(buf + ETH_HLEN_ + IP4_HLEN + 4, built + ETH_HLEN_ + IP4_HLEN,
+	       len - ETH_HLEN_ - IP4_HLEN);
+	ip[0] = 0x46;
+	tot = get16(ip + 2) + 4;
+	ip[2] = tot >> 8;
+	ip[3] = tot & 0xff;
+	ip4_fix_cksum(ip);
+
+	CHECK(bfd_frame_parse(buf, len + 4, &fi) == BFD_FRAME_OK);
+	CHECK(fi.dport == 6784 && fi.plen == sizeof(payload));
+	CHECK(fi.payload == buf + ETH_HLEN_ + IP4_HLEN + 4 + UDP_HLEN);
+}
+
 int main(void)
 {
 	test_ipv4_layout();
@@ -298,9 +502,14 @@ int main(void)
 #ifdef GNU_LINUX
 	test_echo_equivalence();
 #endif
+	test_parse_round_trip();
+	test_parse_padding();
+	test_parse_truncated();
+	test_parse_rejects();
+	test_parse_ip4_options();
 
 	assert(checks > 0);
-	puts("BFD frame builder checks passed.");
+	puts("BFD frame builder and parser checks passed.");
 
 	return 0;
 }

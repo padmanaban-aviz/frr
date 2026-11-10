@@ -7,4 +7,4 @@ class TestBfdFrame(frrtest.TestMultiOut):
     program = "./test_bfd_frame"
 
 
-TestBfdFrame.onesimple("BFD frame builder checks passed.")
+TestBfdFrame.onesimple("BFD frame builder and parser checks passed.")
