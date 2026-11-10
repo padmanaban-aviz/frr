@@ -52,6 +52,7 @@
 #include "zebra/zserv.h"
 
 DEFINE_MTYPE_STATIC(ZEBRA, ZEBRA_MBFD_REG, "micro-BFD bond registration");
+DEFINE_MTYPE_STATIC(ZEBRA, ZEBRA_MBFD_SAVED, "micro-BFD saved member state");
 
 /* A bond registered by a client. */
 PREDECL_DLIST(mbfd_regs);
@@ -72,6 +73,22 @@ struct mbfd_reg {
 DECLARE_DLIST(mbfd_regs, struct mbfd_reg, item);
 
 static struct mbfd_regs_head mbfd_regs;
+
+/*
+ * State file lines loaded at startup and not acted on yet. They are kept in
+ * every state file write until handled, so a detach done in the first
+ * seconds after a restart can't wipe them out, and is saved itself.
+ */
+PREDECL_DLIST(mbfd_saved);
+struct mbfd_saved {
+	struct mbfd_saved_item item;
+	char mname[IFNAMSIZ + 1];
+	char bname[IFNAMSIZ + 1];
+	int failopen;
+};
+DECLARE_DLIST(mbfd_saved, struct mbfd_saved, item);
+
+static struct mbfd_saved_head mbfd_saved;
 static struct event *t_state_read;
 static unsigned int state_read_tries;
 
@@ -878,37 +895,6 @@ static void mbfd_state_write_cb(struct interface *ifp, void *arg)
 		reg ? !!CHECK_FLAG(reg->flags, ZAPI_LAG_REG_F_FAIL_OPEN) : 0);
 }
 
-static void mbfd_state_write(void)
-{
-	char path[MAXPATHLEN], tmp[MAXPATHLEN + 8];
-	struct stat st;
-	FILE *fp;
-
-	/* Don't let a write wipe out a state file not yet read at startup. */
-	if (t_state_read)
-		return;
-
-	mbfd_state_path(path, sizeof(path));
-	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
-
-	fp = fopen(tmp, "w");
-	if (!fp) {
-		zlog_warn("micro-BFD: can't write %s: %s", tmp, safe_strerror(errno));
-		return;
-	}
-	mbfd_if_walk(NULL, mbfd_state_write_cb, fp);
-	fclose(fp);
-
-	if (stat(tmp, &st) == 0 && st.st_size == 0) {
-		unlink(tmp);
-		unlink(path);
-		return;
-	}
-
-	if (rename(tmp, path) < 0)
-		zlog_warn("micro-BFD: can't rename %s: %s", tmp, safe_strerror(errno));
-}
-
 static struct interface *mbfd_if_by_name(const char *name)
 {
 	struct interface *ifp;
@@ -923,11 +909,49 @@ static struct interface *mbfd_if_by_name(const char *name)
 	return NULL;
 }
 
-static void mbfd_state_read_cb(struct event *t)
+static void mbfd_state_write(void)
 {
-	char path[MAXPATHLEN], line[128], mname[IFNAMSIZ + 1], bname[IFNAMSIZ + 1];
-	bool unresolved = false;
-	int failopen;
+	char path[MAXPATHLEN], tmp[MAXPATHLEN + 8];
+	struct mbfd_saved *sv;
+	struct stat st;
+	FILE *fp;
+
+	mbfd_state_path(path, sizeof(path));
+	snprintf(tmp, sizeof(tmp), "%s.tmp", path);
+
+	fp = fopen(tmp, "w");
+	if (!fp) {
+		zlog_warn("micro-BFD: can't write %s: %s", tmp, safe_strerror(errno));
+		return;
+	}
+	mbfd_if_walk(NULL, mbfd_state_write_cb, fp);
+
+	/* Saved lines not handled yet, unless written above already. */
+	frr_each (mbfd_saved, &mbfd_saved, sv) {
+		struct interface *ifp = mbfd_if_by_name(sv->mname);
+		struct zebra_if *zif = ifp ? ifp->info : NULL;
+
+		if (zif && CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED))
+			continue;
+		fprintf(fp, "%s %s %d\n", sv->mname, sv->bname, sv->failopen);
+	}
+	fclose(fp);
+
+	if (stat(tmp, &st) == 0 && st.st_size == 0) {
+		unlink(tmp);
+		unlink(path);
+		return;
+	}
+
+	if (rename(tmp, path) < 0)
+		zlog_warn("micro-BFD: can't rename %s: %s", tmp, safe_strerror(errno));
+}
+
+/* At startup: load the state file left by the previous zebra. */
+static void mbfd_state_load(void)
+{
+	char path[MAXPATHLEN], line[128];
+	struct mbfd_saved *sv;
 	FILE *fp;
 
 	mbfd_state_path(path, sizeof(path));
@@ -936,24 +960,43 @@ static void mbfd_state_read_cb(struct event *t)
 		return;
 
 	while (fgets(line, sizeof(line), fp)) {
-		struct interface *mifp, *bifp;
+		sv = XCALLOC(MTYPE_ZEBRA_MBFD_SAVED, sizeof(*sv));
+		if (sscanf(line, "%16s %16s %d", sv->mname, sv->bname, &sv->failopen) != 3) {
+			XFREE(MTYPE_ZEBRA_MBFD_SAVED, sv);
+			continue;
+		}
+		mbfd_saved_add_tail(&mbfd_saved, sv);
+	}
+	fclose(fp);
+}
+
+/* Act on the saved lines once interfaces are known; retry missing ones. */
+static void mbfd_state_read_cb(struct event *t)
+{
+	bool last = ++state_read_tries >= MBFD_STATE_READ_RETRIES;
+	bool unresolved = false;
+	struct mbfd_saved *sv;
+
+	frr_each_safe (mbfd_saved, &mbfd_saved, sv) {
+		struct interface *mifp = mbfd_if_by_name(sv->mname);
+		struct interface *bifp = mbfd_if_by_name(sv->bname);
 		struct zebra_if *zif;
 
-		if (sscanf(line, "%16s %16s %d", mname, bname, &failopen) != 3)
-			continue;
-
-		mifp = mbfd_if_by_name(mname);
-		bifp = mbfd_if_by_name(bname);
 		if (!mifp || !bifp || !IS_ZEBRA_IF_BOND(bifp)) {
-			unresolved = true;
-			continue;
+			if (!last) {
+				unresolved = true;
+				continue;
+			}
+			zlog_warn("micro-BFD: saved state for %s (bond %s) dropped: interface not found",
+				  sv->mname, sv->bname);
+			goto done;
 		}
 
 		zif = mifp->info;
 		if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED))
-			continue; /* already known (a client re-registered first) */
+			goto done; /* already known (a client re-registered first) */
 
-		if (failopen) {
+		if (sv->failopen) {
 			if (mbfd_kernel_bond(mifp) != bifp->ifindex) {
 				zlog_info("micro-BFD: %s was detached before zebra restarted, re-attaching it to %s (fail-open)",
 					  mifp->name, bifp->name);
@@ -967,14 +1010,14 @@ static void mbfd_state_read_cb(struct event *t)
 			mbfd_member_kernel_change(mifp);
 			mbfd_notify_member(mifp);
 		}
+done:
+		mbfd_saved_del(&mbfd_saved, sv);
+		XFREE(MTYPE_ZEBRA_MBFD_SAVED, sv);
 	}
-	fclose(fp);
 
-	if (unresolved && ++state_read_tries < MBFD_STATE_READ_RETRIES) {
+	if (unresolved)
 		event_add_timer(zrouter.master, mbfd_state_read_cb, NULL, MBFD_STATE_READ_DELAY,
 				&t_state_read);
-		return;
-	}
 
 	mbfd_state_write();
 }
@@ -1048,6 +1091,8 @@ void zebra_mbfd_if_show(struct vty *vty, json_object *json_if, struct interface 
 void zebra_mbfd_init(void)
 {
 	mbfd_regs_init(&mbfd_regs);
+	mbfd_saved_init(&mbfd_saved);
+	mbfd_state_load();
 	hook_register(zserv_client_close, mbfd_client_close);
 	event_add_timer(zrouter.master, mbfd_state_read_cb, NULL, MBFD_STATE_READ_DELAY,
 			&t_state_read);
@@ -1056,8 +1101,12 @@ void zebra_mbfd_init(void)
 void zebra_mbfd_finish(void)
 {
 	struct mbfd_reg *reg;
+	struct mbfd_saved *sv;
 
 	event_cancel(&t_state_read);
+	while ((sv = mbfd_saved_pop(&mbfd_saved)))
+		XFREE(MTYPE_ZEBRA_MBFD_SAVED, sv);
+	mbfd_saved_fini(&mbfd_saved);
 	hook_unregister(zserv_client_close, mbfd_client_close);
 
 	/* Clients were closed (and failed open) already; drop leftovers. */

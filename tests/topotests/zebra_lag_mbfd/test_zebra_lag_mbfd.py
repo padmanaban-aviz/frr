@@ -325,6 +325,14 @@ def _register(r1, extra=""):
     _expect(_try, count=30, wait=1)
 
 
+STATE_FILE = "/var/run/frr/zebra_mbfd.state"
+
+
+def _state_has(r1, line):
+    lines = r1.run("cat {} 2>/dev/null".format(STATE_FILE)).splitlines()
+    return None if line in lines else "{!r} not in state file {}".format(line, lines)
+
+
 def test_zebra_stop_fail_open():
     "zebra stopping (SIGTERM) re-attaches fail-open members on its way out."
     tgen = get_topogen()
@@ -350,6 +358,8 @@ def test_zebra_crash_fail_open():
     r1.vtysh_cmd("sharp lag-mbfd bond bond0 member r1-eth1 detach")
     _expect(_member_state, r1, "r1-eth1", ("mbfd-detached",), ("attached",), "")
 
+    _expect(_state_has, r1, "r1-eth1 bond0 1")
+
     _zebra_stop(tgen, r1, "KILL")
     assert _master(r1, "r1-eth1") == "", "re-attached without zebra"
     _zebra_start(tgen, r1)
@@ -369,6 +379,7 @@ def test_zebra_stop_fail_closed():
     _register(r1, "fail-closed")
     r1.vtysh_cmd("sharp lag-mbfd bond bond0 member r1-eth1 detach")
     _expect(_member_state, r1, "r1-eth1", ("mbfd-detached",), ("attached",), "")
+    _expect(_state_has, r1, "r1-eth1 bond0 0")
 
     _zebra_stop(tgen, r1, "TERM")
     assert _master(r1, "r1-eth1") == "", "fail-closed member re-attached"
@@ -380,6 +391,48 @@ def test_zebra_stop_fail_closed():
     _expect(_member_state, r1, "r1-eth1", ("mbfd-detached",), ("attached",), "")
     r1.vtysh_cmd("sharp lag-mbfd bond bond0 member r1-eth1 attach")
     _expect(_member_state, r1, "r1-eth1", ATTACHED_OK, ("mbfd-detached",), "bond0")
+
+
+def test_state_saved_while_startup_read_pending():
+    """
+    A detach done while zebra still waits to act on its saved state (up to
+    30 s after start when a saved interface is missing) is saved too, and
+    the not-yet-handled saved lines are kept.
+    """
+    tgen = get_topogen()
+    _skip(tgen)
+    r1 = tgen.gears["r1"]
+
+    _register(r1)
+    _zebra_stop(tgen, r1, "TERM")
+    # A line for an interface that doesn't exist keeps the startup read
+    # retrying for ~30 s.
+    # Owned by frr, like the file zebra writes itself (the run directory
+    # may be sticky, so zebra couldn't replace a root-owned file).
+    r1.run(
+        "echo 'ghost0 bond0 1' > {0}; chown frr:frr {0} 2>/dev/null".format(STATE_FILE)
+    )
+    r1.run("ls -ld /var/run/frr {}".format(STATE_FILE))
+    _zebra_start(tgen, r1)
+
+    _register(r1)
+    r1.vtysh_cmd("sharp lag-mbfd bond bond0 member r1-eth1 detach")
+    _expect(_member_state, r1, "r1-eth1", ("mbfd-detached",), ("attached",), "")
+    _expect(_state_has, r1, "r1-eth1 bond0 1")
+    assert _state_has(r1, "ghost0 bond0 1") is None, "unhandled saved line lost"
+
+    r1.vtysh_cmd("sharp lag-mbfd bond bond0 member r1-eth1 attach")
+    _expect(_member_state, r1, "r1-eth1", ATTACHED_OK, ("mbfd-detached",), "bond0")
+    # After the retries the missing interface's line is dropped.
+    _expect(
+        lambda: (
+            None
+            if _state_has(r1, "ghost0 bond0 1") is not None
+            else "ghost0 line still saved"
+        ),
+        count=50,
+        wait=1,
+    )
 
 
 def test_unsupported_mode_and_not_found():
