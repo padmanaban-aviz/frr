@@ -13,6 +13,7 @@
 #include "lib/vty.h"
 
 #include "bfd.h"
+#include "bfd_lag.h"
 #include "bfd_trace.h"
 
 #include "bfdd/bfdd_vty_clippy.c"
@@ -80,6 +81,8 @@ static const char *bfd_mode_type_to_string(enum bfd_mode_type mode)
 		return "sbfd-echo";
 	case BFD_MODE_TYPE_SBFD_INIT:
 		return "sbfd-init";
+	case BFD_MODE_TYPE_MICRO_BFD:
+		return "micro-bfd";
 	default:
 		return "Unknown";
 	}
@@ -115,7 +118,8 @@ static void _display_peer_header(struct vty *vty, struct bfd_session *bs)
 		inet_ntop(bs->key.family, &bs->key.peer, addr_buf,
 			  sizeof(addr_buf)));
 
-	if (bs->bfd_mode == BFD_MODE_TYPE_SBFD_ECHO || bs->bfd_mode == BFD_MODE_TYPE_SBFD_INIT)
+	if (bs->bfd_mode == BFD_MODE_TYPE_SBFD_ECHO || bs->bfd_mode == BFD_MODE_TYPE_SBFD_INIT ||
+	    bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD)
 		vty_out(vty, " bfd-mode %s", bfd_mode_type_to_string(bs->bfd_mode));
 
 	if (bs->bfd_name[0])
@@ -313,6 +317,13 @@ static struct json_object *_peer_json_header(struct bfd_session *bs)
 		json_object_string_add(jo, "vrf", bs->key.vrfname);
 	if (bs->key.ifname[0])
 		json_object_string_add(jo, "interface", bs->key.ifname);
+
+	/* RFC 7130 micro-BFD session: the LAG it monitors a member of. */
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD) {
+		json_object_string_add(jo, "bfdMode", bfd_mode_type_to_string(bs->bfd_mode));
+		if (bfd_lag_session_lag_name(bs))
+			json_object_string_add(jo, "lag", bfd_lag_session_lag_name(bs));
+	}
 
 	return jo;
 }
@@ -1372,6 +1383,42 @@ DEFPY(
 }
 
 DEFPY(
+	bfd_debug_lag, bfd_debug_lag_cmd,
+	"[no] debug bfd lag",
+	NO_STR
+	DEBUG_STR
+	"Bidirection Forwarding Detection\n"
+	"RFC 7130 micro-BFD (LAG member) debugging\n")
+{
+	bglobal.debug_lag = !no;
+	return CMD_SUCCESS;
+}
+
+DEFPY(bfd_show_lag_statistics, bfd_show_lag_statistics_cmd,
+      "show bfd lag statistics [json$json]",
+      SHOW_STR
+      "Bidirection Forwarding Detection\n"
+      "RFC 7130 micro-BFD on LAG (bond) interfaces\n"
+      "Session counts\n"
+      JSON_STR)
+{
+	bfd_lag_show_statistics(vty, !!json);
+	return CMD_SUCCESS;
+}
+
+DEFPY(bfd_show_lag, bfd_show_lag_cmd,
+      "show bfd lag [IFNAME$ifname] [json$json]",
+      SHOW_STR
+      "Bidirection Forwarding Detection\n"
+      "RFC 7130 micro-BFD on LAG (bond) interfaces\n"
+      "LAG (bond) interface name\n"
+      JSON_STR)
+{
+	bfd_lag_show(vty, ifname, !!json);
+	return CMD_SUCCESS;
+}
+
+DEFPY(
 	bfd_debug_network, bfd_debug_network_cmd,
 	"[no] debug bfd network",
 	NO_STR
@@ -1496,6 +1543,8 @@ DEFUN_NOSH(show_debugging_bfd,
 		vty_out(vty, "  Zebra events debugging is on.\n");
 	if (bglobal.debug_network)
 		vty_out(vty, "  Network layer debugging is on.\n");
+	if (bglobal.debug_lag)
+		vty_out(vty, "  Micro-BFD (LAG) debugging is on.\n");
 
 	cmd_show_lib_debugs(vty);
 
@@ -1544,6 +1593,11 @@ static int bfdd_write_config(struct vty *vty)
 		written = 1;
 	}
 
+	if (bglobal.debug_lag) {
+		vty_out(vty, "debug bfd lag\n");
+		written = 1;
+	}
+
 	if (bglobal.debug_peer_event) {
 		vty_out(vty, "debug bfd peer\n");
 		written = 1;
@@ -1589,11 +1643,15 @@ void bfdd_vty_init(void)
 	install_element(ENABLE_NODE, &bfd_debug_peer_cmd);
 	install_element(ENABLE_NODE, &bfd_debug_zebra_cmd);
 	install_element(ENABLE_NODE, &bfd_debug_network_cmd);
+	install_element(ENABLE_NODE, &bfd_debug_lag_cmd);
+	install_element(ENABLE_NODE, &bfd_show_lag_cmd);
+	install_element(ENABLE_NODE, &bfd_show_lag_statistics_cmd);
 
 	install_element(CONFIG_NODE, &bfd_debug_distributed_cmd);
 	install_element(CONFIG_NODE, &bfd_debug_peer_cmd);
 	install_element(CONFIG_NODE, &bfd_debug_zebra_cmd);
 	install_element(CONFIG_NODE, &bfd_debug_network_cmd);
+	install_element(CONFIG_NODE, &bfd_debug_lag_cmd);
 
 	/* Install BFD node and commands. */
 	install_node(&bfd_node);

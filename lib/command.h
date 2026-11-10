@@ -175,6 +175,7 @@ enum node_type {
 	BFD_NODE,		 /* BFD protocol mode. */
 	BFD_PEER_NODE,		 /* BFD peer configuration mode. */
 	BFD_PROFILE_NODE,	 /* BFD profile configuration mode. */
+	BFD_LAG_NODE,		 /* BFD RFC 7130 micro-BFD LAG configuration mode. */
 	OPENFABRIC_NODE,	/* OpenFabric router configuration node */
 	VRRP_NODE,		 /* VRRP node */
 	BMP_NODE,		/* BMP config under router bgp */

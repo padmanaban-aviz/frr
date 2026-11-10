@@ -43,6 +43,7 @@
 #include "lib/keychain.h"
 #include "bfd.h"
 #include "bfd_frame.h"
+#include "bfd_lag.h"
 #include "bfd_trace.h"
 #define BUF_SIZ		   1024
 #define SOCK_OPT_PRIO_HIGH 6
@@ -56,26 +57,6 @@ int _ptm_bfd_send(struct bfd_session *bs, uint16_t *port, const void *data,
 
 static void bfd_sd_reschedule(struct bfd_vrf_global *bvrf, int sd);
 
-/* Where and how a BFD control packet was received. */
-struct bfd_ctrl_rx {
-	/* Receiving socket. */
-	int sd;
-	/* Received on a multi hop socket. */
-	bool is_mhop;
-	/* TTL / hop limit of the received packet. */
-	uint8_t ttl;
-	/* Receiving interface (index, and pointer if known). */
-	ifindex_t ifindex;
-	struct interface *ifp;
-	/* VRF the packet belongs to. */
-	vrf_id_t vrfid;
-	/* Packet destination (local) and source (peer) addresses. */
-	struct sockaddr_any local;
-	struct sockaddr_any peer;
-};
-
-static void bfd_ctrl_pkt_process(struct bfd_session *bfd, struct bfd_pkt *cp, ssize_t mlen,
-				 const struct bfd_ctrl_rx *rx);
 ssize_t bfd_recv_ipv4(int sd, uint8_t *msgbuf, size_t msgbuflen, uint8_t *ttl,
 		      ifindex_t *ifindex, struct sockaddr_any *local,
 		      struct sockaddr_any *peer);
@@ -124,6 +105,10 @@ int _ptm_bfd_send(struct bfd_session *bs, uint16_t *port, const void *data,
 	socklen_t slen;
 	ssize_t rv;
 	int sd = -1;
+
+	/* RFC 7130 micro-BFD sends whole frames on the member link. */
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD)
+		return bfd_lag_send(bs, data, datalen);
 
 	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_IPV6)) {
 		memset(&sin6, 0, sizeof(sin6));
@@ -479,7 +464,14 @@ void ptm_bfd_snd(struct bfd_session *bfd, int fbit)
 		cp.timers.desired_min_tx = htonl(MAX(bfd->timers.desired_min_tx, 1000000));
 		cp.timers.required_min_rx = htonl(MAX(bfd->timers.required_min_rx, 1000000));
 	}
-	cp.timers.required_min_echo = htonl(bfd->timers.required_min_echo_rx);
+	/*
+	 * RFC 7130, Section 2.2: micro-BFD runs in Asynchronous mode only;
+	 * advertise that we don't take echo packets.
+	 */
+	if (bfd->bfd_mode == BFD_MODE_TYPE_MICRO_BFD)
+		cp.timers.required_min_echo = 0;
+	else
+		cp.timers.required_min_echo = htonl(bfd->timers.required_min_echo_rx);
 
 	/* Authentication Handling */
 	if (bfd->kc) {
@@ -1300,10 +1292,11 @@ void bfd_recv_cb(struct event *t)
  *
  * The caller has already read the packet, checked that it holds at least a
  * full fixed header and found its session. Keeping this part separate lets
- * other receive paths share the same validation and state handling.
+ * other receive paths (RFC 7130 micro-BFD, bfd_lag.c) share the same
+ * validation and state handling.
  */
-static void bfd_ctrl_pkt_process(struct bfd_session *bfd, struct bfd_pkt *cp, ssize_t mlen,
-				 const struct bfd_ctrl_rx *rx)
+void bfd_ctrl_pkt_process(struct bfd_session *bfd, struct bfd_pkt *cp, ssize_t mlen,
+			  const struct bfd_ctrl_rx *rx)
 {
 	bool is_mhop = rx->is_mhop;
 	uint8_t ttl = rx->ttl;
@@ -1424,7 +1417,8 @@ static void bfd_ctrl_pkt_process(struct bfd_session *bfd, struct bfd_pkt *cp, ss
 		if (bfd->local_address.sa_sin.sin_family == AF_UNSPEC)
 			bfd->local_address = local;
 #ifdef BFD_LINUX
-		if (ifp)
+		/* For echo; micro-BFD has none, and reads on a raw socket. */
+		if (ifp && bfd->bfd_mode != BFD_MODE_TYPE_MICRO_BFD)
 			bfd_peer_mac_set(rx->sd, bfd, &peer, ifp);
 #endif
 	}

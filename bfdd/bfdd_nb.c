@@ -1097,6 +1097,252 @@ const struct frr_yang_module_info frr_bfdd_info = {
 			}
 		},
 		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session",
+			.cbs = {
+				.create = bfdd_bfd_lag_session_create,
+				.destroy = bfdd_bfd_lag_session_destroy,
+				.apply_finish = bfdd_bfd_lag_session_apply_finish,
+				.get_next = bfdd_bfd_lag_session_get_next,
+				.get_keys = bfdd_bfd_lag_session_get_keys,
+				.lookup_entry = bfdd_bfd_lag_session_lookup_entry,
+				.cli_show = bfd_cli_show_lag,
+				.cli_show_end = bfd_cli_show_lag_end,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/use-ipv4",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_use_ipv4_modify,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/ipv4-dest-addr",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_ipv4_dest_addr_modify,
+				.destroy = bfdd_bfd_lag_session_ipv4_dest_addr_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/ipv4-source-addr",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_ipv4_source_addr_modify,
+				.destroy = bfdd_bfd_lag_session_ipv4_source_addr_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/admin-down",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_admin_down_modify,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/profile",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_profile_modify,
+				.destroy = bfdd_bfd_lag_session_profile_destroy,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/mode",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_mode_modify,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/enable-grace",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_enable_grace_modify,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/hold-up",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_hold_up_modify,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links",
+			.cbs = {
+				.get_next = bfdd_bfd_lag_session_member_links_get_next,
+				.get_keys = bfdd_bfd_lag_session_member_links_get_keys,
+				.lookup_entry = bfdd_bfd_lag_session_member_links_lookup_entry,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/member-link",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_session_member_links_member_link_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/detached",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_session_member_links_detached_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/distributing",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_session_member_links_distributing_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/reason",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_session_member_links_reason_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/local-discriminator",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_local_discriminator_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/local-state",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_local_state_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/local-diagnostic",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_local_diagnostic_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/local-multiplier",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_local_multiplier_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/remote-discriminator",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_remote_discriminator_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/remote-state",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_remote_state_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/remote-diagnostic",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_remote_diagnostic_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/remote-multiplier",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_remote_multiplier_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/negotiated-transmission-interval",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_negotiated_transmission_interval_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/negotiated-receive-interval",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_negotiated_receive_interval_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/detection-mode",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_detection_mode_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/last-down-time",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_last_down_time_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/last-up-time",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_last_up_time_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/session-down-count",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_session_down_count_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/session-up-count",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_session_up_count_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/control-packet-input-count",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_control_packet_input_count_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/control-packet-input-count-bad",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_control_packet_input_count_bad_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/control-packet-output-count",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_control_packet_output_count_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/negotiated-echo-transmission-interval",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_negotiated_echo_transmission_interval_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/echo-packet-input-count",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_echo_packet_input_count_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links/micro-bfd-ipv4/echo-packet-output-count",
+			.cbs = {
+				.get_elem = bfdd_bfd_sessions_single_hop_stats_echo_packet_output_count_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/micro-bfd-ipv4-session-statistics/summary/number-of-sessions",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_stats_sessions_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/micro-bfd-ipv4-session-statistics/summary/number-of-sessions-up",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_stats_sessions_up_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/micro-bfd-ipv4-session-statistics/summary/number-of-sessions-down",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_stats_sessions_down_get_elem,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/micro-bfd-ipv4-session-statistics/summary/number-of-sessions-admin-down",
+			.cbs = {
+				.get_elem = bfdd_bfd_lag_stats_sessions_admin_down_get_elem,
+			}
+		},
+		{
 			.xpath = NULL,
 		},
 	}

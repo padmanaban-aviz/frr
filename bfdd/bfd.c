@@ -19,6 +19,7 @@
 
 #include "bfd.h"
 #include "bfd_trace.h"
+#include "bfd_lag.h"
 
 DEFINE_MTYPE_STATIC(BFDD, BFDD_CONFIG, "long-lived configuration memory");
 DEFINE_MTYPE_STATIC(BFDD, BFDD_PROFILE, "long-lived profile memory");
@@ -203,7 +204,14 @@ void bfd_session_apply(struct bfd_session *bs)
 		bs->timers.required_min_rx = bs->peer_profile.min_rx;
 
 	/* We can only apply echo options on single hop sessions. */
-	if (!CHECK_FLAG(bs->flags, BFD_SESS_FLAG_MH)) {
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD) {
+		/*
+		 * RFC 7130, Section 2.2: micro-BFD is Asynchronous mode
+		 * only. Echo, Demand and passive settings of the profile
+		 * don't apply.
+		 */
+		bfd_set_echo(bs, false);
+	} else if (!CHECK_FLAG(bs->flags, BFD_SESS_FLAG_MH)) {
 		/* Configure echo timers if they were default. */
 		if (bs->peer_profile.min_echo_rx == BFD_DEF_REQ_MIN_ECHO_RX)
 			bs->timers.required_min_echo_rx = bp->min_echo_rx;
@@ -231,7 +239,9 @@ void bfd_session_apply(struct bfd_session *bs)
 	}
 
 	/* Toggle 'demand-mode' if default value. */
-	if (bs->peer_profile.demand_mode == false)
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD)
+		bfd_set_demand(bs, false);
+	else if (bs->peer_profile.demand_mode == false)
 		bfd_set_demand(bs, bp->demand_mode);
 	else
 		bfd_set_demand(bs, bs->peer_profile.demand_mode);
@@ -378,6 +388,10 @@ int bfd_session_enable(struct bfd_session *bs)
 	if (bs->bdc)
 		return 0;
 
+	/* RFC 7130 micro-BFD: raw sockets on a LAG member. */
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD)
+		return bfd_lag_session_enable(bs);
+
 	/*
 	 * If the interface or VRF doesn't exist, then we must register
 	 * the session but delay its start.
@@ -510,6 +524,11 @@ void bfd_session_disable(struct bfd_session *bs)
 	/* We are using data plane, we don't need software. */
 	if (bs->bdc)
 		return;
+
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD) {
+		bfd_lag_session_disable(bs);
+		return;
+	}
 
 	frrtrace(2, frr_bfd, session_enable_event, false, bs);
 
@@ -1256,6 +1275,10 @@ void bfd_session_free(struct bfd_session *bs)
 	struct bfd_session_observer *bso;
 
 	frrtrace(2, frr_bfd, session_lifecycle, false, bs);
+
+	/* Unlink a micro-BFD session from its LAG member first. */
+	if (bs->lag_mbr)
+		bfd_lag_session_freed(bs);
 
 	bfd_session_disable(bs);
 
@@ -2733,6 +2756,11 @@ static void bfd_profile_detach(struct bfd_profile *bp, bool suppress_profile)
  * Permitted VRFs related functions.
  */
 
+bool bfd_vrf_is_permitted(const char *vrf_name)
+{
+	return bfd_vrf_is_perm(vrf_name);
+}
+
 static bool bfd_vrf_is_perm(const char *vrf_name)
 {
 	if (!bfd_perm_vrfs_count(&bfd_perm_vrfs))
@@ -2809,6 +2837,7 @@ static int bfd_vrf_new(struct vrf *vrf)
 	bvrf->bg_echo = -1;
 	bvrf->bg_echov6 = -1;
 	bvrf->bg_initv6 = -1;
+	bvrf->bg_mbfd = -1;
 
 	return 0;
 }
@@ -2866,6 +2895,7 @@ static int bfd_vrf_disable(struct vrf *vrf)
 
 	/* Close all sockets and cancel events for this VRF. */
 	bfd_vrf_stop_sockets(bvrf);
+	bfd_lag_vrf_disable(bvrf);
 	bvrf->bg_session_count = 0;
 	bvrf->bg_reflector_count = 0;
 

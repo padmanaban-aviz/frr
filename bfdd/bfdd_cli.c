@@ -606,6 +606,8 @@ static const char *_bfd_cli_bfd_mode_type_to_string(enum bfd_mode_type mode)
 		return "sbfd-echo";
 	case BFD_MODE_TYPE_SBFD_INIT:
 		return "sbfd-init";
+	case BFD_MODE_TYPE_MICRO_BFD:
+		return "micro-bfd";
 	default:
 		return "Unknown";
 	}
@@ -1423,6 +1425,167 @@ void bfd_cli_peer_profile_show(struct vty *vty, const struct lyd_node *dnode,
 	vty_out(vty, "  profile %s\n", yang_dnode_get_string(dnode, NULL));
 }
 
+
+/*
+ * RFC 7130 micro-BFD commands.
+ */
+#define LAG_STR	   "RFC 7130 micro-BFD on a LAG (bond) interface\n"
+#define LAG_IF_STR "LAG (bond) interface name\n"
+
+DEFPY_YANG_NOSH(bfd_lag_enter, bfd_lag_enter_cmd,
+	"lag IFNAME$ifname",
+	LAG_STR
+	LAG_IF_STR)
+{
+	char xpath[XPATH_MAXLEN];
+	int rv;
+
+	snprintf(xpath, sizeof(xpath), "/frr-bfdd:bfdd/bfd/lag/session[lag-name='%s']", ifname);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_CREATE, NULL);
+
+	rv = nb_cli_apply_changes(vty, NULL);
+	if (rv == CMD_SUCCESS)
+		VTY_PUSH_XPATH(BFD_LAG_NODE, xpath);
+
+	return rv;
+}
+
+DEFPY_YANG(no_bfd_lag, no_bfd_lag_cmd,
+	"no lag IFNAME$ifname",
+	NO_STR
+	LAG_STR
+	LAG_IF_STR)
+{
+	char xpath[XPATH_MAXLEN];
+
+	snprintf(xpath, sizeof(xpath), "/frr-bfdd:bfdd/bfd/lag/session[lag-name='%s']", ifname);
+	nb_cli_enqueue_change(vty, xpath, NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(bfd_lag_ipv4, bfd_lag_ipv4_cmd,
+	"ipv4 dest-addr A.B.C.D$dest [source-addr A.B.C.D$src]",
+	"IPv4 micro-BFD sessions\n"
+	"IPv4 address of the peer's LAG\n"
+	"IPv4 address\n"
+	"Source address (default: the LAG's primary IPv4 address)\n"
+	"IPv4 address\n")
+{
+	nb_cli_enqueue_change(vty, "./ipv4-dest-addr", NB_OP_MODIFY, dest_str);
+	if (src_str)
+		nb_cli_enqueue_change(vty, "./ipv4-source-addr", NB_OP_MODIFY, src_str);
+	else
+		nb_cli_enqueue_change(vty, "./ipv4-source-addr", NB_OP_DESTROY, NULL);
+	nb_cli_enqueue_change(vty, "./use-ipv4", NB_OP_MODIFY, "true");
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_ipv4, no_bfd_lag_ipv4_cmd,
+	"no ipv4 [dest-addr A.B.C.D [source-addr A.B.C.D]]",
+	NO_STR
+	"IPv4 micro-BFD sessions\n"
+	"IPv4 address of the peer's LAG\n"
+	"IPv4 address\n"
+	"Source address\n"
+	"IPv4 address\n")
+{
+	nb_cli_enqueue_change(vty, "./use-ipv4", NB_OP_MODIFY, "false");
+	nb_cli_enqueue_change(vty, "./ipv4-dest-addr", NB_OP_DESTROY, NULL);
+	nb_cli_enqueue_change(vty, "./ipv4-source-addr", NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(bfd_lag_shutdown, bfd_lag_shutdown_cmd,
+	"[no] shutdown",
+	NO_STR
+	"Disable the micro-BFD sessions (members stay in the LAG)\n")
+{
+	/* RFC 9314 ietf-bfd-lag admin-down. */
+	nb_cli_enqueue_change(vty, "./admin-down", NB_OP_MODIFY, no ? "false" : "true");
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(bfd_lag_enable_grace, bfd_lag_enable_grace_cmd,
+	"enable-grace (0-60000)$ms",
+	"Time a new session gets to come up before its member is taken out\n"
+	"Milliseconds\n")
+{
+	nb_cli_enqueue_change(vty, "./enable-grace", NB_OP_MODIFY, ms_str);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_enable_grace, no_bfd_lag_enable_grace_cmd,
+	"no enable-grace [(0-60000)]",
+	NO_STR
+	"Time a new session gets to come up before its member is taken out\n"
+	"Milliseconds\n")
+{
+	nb_cli_enqueue_change(vty, "./enable-grace", NB_OP_MODIFY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(bfd_lag_hold_up, bfd_lag_hold_up_cmd,
+	"hold-up (0-60000)$ms",
+	"Time a session must stay up before its member is put back\n"
+	"Milliseconds\n")
+{
+	nb_cli_enqueue_change(vty, "./hold-up", NB_OP_MODIFY, ms_str);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_hold_up, no_bfd_lag_hold_up_cmd,
+	"no hold-up [(0-60000)]",
+	NO_STR
+	"Time a session must stay up before its member is put back\n"
+	"Milliseconds\n")
+{
+	nb_cli_enqueue_change(vty, "./hold-up", NB_OP_MODIFY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
+{
+	vty_out(vty, " lag %s\n", yang_dnode_get_string(dnode, "lag-name"));
+
+	if (yang_dnode_exists(dnode, "ipv4-dest-addr")) {
+		vty_out(vty, "  ipv4 dest-addr %s", yang_dnode_get_string(dnode, "ipv4-dest-addr"));
+		if (yang_dnode_exists(dnode, "ipv4-source-addr"))
+			vty_out(vty, " source-addr %s",
+				yang_dnode_get_string(dnode, "ipv4-source-addr"));
+		vty_out(vty, "\n");
+	}
+
+	if (yang_dnode_exists(dnode, "profile"))
+		vty_out(vty, "  profile %s\n", yang_dnode_get_string(dnode, "profile"));
+
+	if (show_defaults || !yang_dnode_is_default(dnode, "enable-grace"))
+		vty_out(vty, "  enable-grace %u\n", yang_dnode_get_uint32(dnode, "enable-grace"));
+
+	if (show_defaults || !yang_dnode_is_default(dnode, "hold-up"))
+		vty_out(vty, "  hold-up %u\n", yang_dnode_get_uint32(dnode, "hold-up"));
+
+	if (yang_dnode_get_bool(dnode, "admin-down"))
+		vty_out(vty, "  shutdown\n");
+	else if (show_defaults)
+		vty_out(vty, "  no shutdown\n");
+}
+
+void bfd_cli_show_lag_end(struct vty *vty, const struct lyd_node *dnode __attribute__((__unused__)))
+{
+	vty_out(vty, " exit\n");
+	vty_out(vty, " !\n");
+}
+
+struct cmd_node bfd_lag_node = {
+	.name = "bfd lag",
+	.node = BFD_LAG_NODE,
+	.parent_node = BFD_NODE,
+	.prompt = "%s(config-bfd-lag)# ",
+};
+
 struct cmd_node bfd_profile_node = {
 	.name = "bfd profile",
 	.node = BFD_PROFILE_NODE,
@@ -1546,4 +1709,17 @@ bfdd_cli_init(void)
 	install_element(BFD_PROFILE_NODE, &no_bfd_profile_minimum_ttl_cmd);
 	install_element(BFD_PROFILE_NODE, &bfd_profile_set_authentication_key_chain_cmd);
 	install_element(BFD_PROFILE_NODE, &bfd_profile_set_authentication_algorithm_meticulous_cmd);
+
+	/* RFC 7130 micro-BFD. */
+	install_node(&bfd_lag_node);
+	install_element(BFD_NODE, &bfd_lag_enter_cmd);
+	install_element(BFD_NODE, &no_bfd_lag_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_ipv4_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_ipv4_cmd);
+	install_element(BFD_LAG_NODE, &bfd_peer_profile_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_shutdown_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_enable_grace_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_enable_grace_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_hold_up_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_hold_up_cmd);
 }

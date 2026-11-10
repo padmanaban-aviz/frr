@@ -1680,6 +1680,13 @@ static struct cmd_node bfd_profile_node = {
 	.prompt = "%s(config-bfd-profile)# ",
 };
 
+static struct cmd_node bfd_lag_node = {
+	.name = "bfd lag",
+	.node = BFD_LAG_NODE,
+	.parent_node = BFD_NODE,
+	.prompt = "%s(config-bfd-lag)# ",
+};
+
 static struct cmd_node pim_node = {
 	.name = "pim",
 	.node = PIM_NODE,
@@ -2550,6 +2557,15 @@ DEFUNSH(VTYSH_BFDD, bfd_profile_enter, bfd_profile_enter_cmd,
 	BFD_PROFILE_NAME_STR)
 {
 	vty->node = BFD_PROFILE_NODE;
+	return CMD_SUCCESS;
+}
+
+DEFUNSH(VTYSH_BFDD, bfd_lag_enter, bfd_lag_enter_cmd,
+	"lag IFNAME",
+	"RFC 7130 micro-BFD on a LAG (bond) interface\n"
+	"LAG (bond) interface name\n")
+{
+	vty->node = BFD_LAG_NODE;
 	return CMD_SUCCESS;
 }
 #endif /* HAVE_BFDD */
@@ -5376,6 +5392,7 @@ void vtysh_init_vty(void)
 	install_node(&bfd_node);
 	install_node(&bfd_peer_node);
 	install_node(&bfd_profile_node);
+	install_node(&bfd_lag_node);
 	install_node(&segment_routing_node);
 	install_node(&sr_traffic_eng_node);
 	install_node(&srte_segment_list_node);
@@ -5705,6 +5722,11 @@ void vtysh_init_vty(void)
 	install_element(BFD_PROFILE_NODE, &vtysh_exit_bfdd_cmd);
 	install_element(BFD_PROFILE_NODE, &vtysh_quit_bfdd_cmd);
 	install_element(BFD_PROFILE_NODE, &vtysh_end_all_cmd);
+
+	install_element(BFD_NODE, &bfd_lag_enter_cmd);
+	install_element(BFD_LAG_NODE, &vtysh_exit_bfdd_cmd);
+	install_element(BFD_LAG_NODE, &vtysh_quit_bfdd_cmd);
+	install_element(BFD_LAG_NODE, &vtysh_end_all_cmd);
 #endif /* HAVE_BFDD */
 
 	install_element(CONFIG_NODE, &segment_routing_cmd);

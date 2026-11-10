@@ -12,6 +12,7 @@
 #include "lib/northbound.h"
 
 #include "bfd.h"
+#include "bfd_lag.h"
 #include "bfdd_nb.h"
 #include <ifaddrs.h>
 
@@ -442,6 +443,7 @@ int bfdd_bfd_destroy(struct nb_cb_destroy_args *args)
 		nb_running_unset_entry(args->dnode);
 
 		bfd_sessions_remove_manual();
+		bfd_lag_free_all();
 		bfd_profiles_remove();
 		break;
 

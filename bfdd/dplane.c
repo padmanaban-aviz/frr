@@ -768,7 +768,17 @@ static uint64_t bfd_dplane_session_needs(const struct bfd_session *bs)
 
 static bool bfd_dplane_can_run(const struct bfd_dplane_ctx *bdc, const struct bfd_session *bs)
 {
-	uint64_t missing = bfd_dplane_session_needs(bs) & ~bdc->caps;
+	uint64_t missing;
+
+	/*
+	 * RFC 7130 micro-BFD sessions stay in bfdd: their failure takes a
+	 * member out of its bond, which only bfdd (through zebra) does, and
+	 * the data plane protocol has no way to describe them.
+	 */
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD)
+		return false;
+
+	missing = bfd_dplane_session_needs(bs) & ~bdc->caps;
 
 	if (!missing)
 		return true;

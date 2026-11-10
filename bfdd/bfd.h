@@ -281,6 +281,8 @@ enum bfd_mode_type {
 	BFD_MODE_TYPE_BFD = 0,
 	BFD_MODE_TYPE_SBFD_ECHO = 1,
 	BFD_MODE_TYPE_SBFD_INIT = 2,
+	/* RFC 7130 micro-BFD session on a LAG member (bfd_lag.c). */
+	BFD_MODE_TYPE_MICRO_BFD = 3,
 };
 
 /*
@@ -464,6 +466,9 @@ struct bfd_session {
 	bool auth_seq_known;
 	struct timeval auth_last_rx_time;
 	bool auth_meticulous;
+
+	/* RFC 7130 micro-BFD: the LAG member this session runs on. */
+	struct bfd_lag_member *lag_mbr;
 };
 
 struct bfd_diag_str_list {
@@ -547,6 +552,15 @@ struct bfd_vrf_global {
 
 	/** Number of SBFD reflectors using this VRF's sockets. */
 	int bg_reflector_count;
+
+	/**
+	 * RFC 7130 micro-BFD: UDP socket bound to port 6784, never read. It
+	 * only stops the kernel answering micro-BFD packets (which bfdd reads
+	 * on raw sockets) with ICMP port unreachable. Open while micro-BFD
+	 * sessions run in this VRF; they don't count in bg_session_count.
+	 */
+	int bg_mbfd;
+	unsigned int bg_mbfd_count;
 };
 
 /* Forward declaration of data plane context struct. */
@@ -578,6 +592,8 @@ struct bfd_global {
 	bool debug_dplane;
 	/* Show all peer state changes events. */
 	bool debug_peer_event;
+	/* Show RFC 7130 micro-BFD (LAG member) events. */
+	bool debug_lag;
 	/*
 	 * Show zebra message exchanges:
 	 * - Interface add/delete.
@@ -633,6 +649,27 @@ void ptm_sbfd_echo_snd(struct bfd_session *bfd);
 void ptm_sbfd_initiator_snd(struct bfd_session *bfd, int fbit);
 
 void bfd_recv_cb(struct event *t);
+
+/* Where and how a BFD control packet was received. */
+struct bfd_ctrl_rx {
+	/* Receiving socket. */
+	int sd;
+	/* Received on a multi hop socket. */
+	bool is_mhop;
+	/* TTL / hop limit of the received packet. */
+	uint8_t ttl;
+	/* Receiving interface (index, and pointer if known). */
+	ifindex_t ifindex;
+	struct interface *ifp;
+	/* VRF the packet belongs to. */
+	vrf_id_t vrfid;
+	/* Packet destination (local) and source (peer) addresses. */
+	struct sockaddr_any local;
+	struct sockaddr_any peer;
+};
+
+void bfd_ctrl_pkt_process(struct bfd_session *bfd, struct bfd_pkt *cp, ssize_t mlen,
+			  const struct bfd_ctrl_rx *rx);
 
 
 /*
@@ -778,6 +815,7 @@ void bfd_vrf_terminate(void);
 int bfd_vrf_start_sockets(struct bfd_vrf_global *bvrf);
 void bfd_vrf_stop_sockets(struct bfd_vrf_global *bvrf);
 struct bfd_vrf_global *bfd_vrf_look_by_session(struct bfd_session *bfd);
+bool bfd_vrf_is_permitted(const char *vrf_name);
 struct bfd_session *bfd_id_lookup(uint32_t id);
 struct bfd_session *bfd_key_lookup(struct bfd_key *key);
 struct sbfd_reflector *sbfd_discr_lookup(uint32_t discr);
@@ -959,6 +997,14 @@ void sbfd_echo_state_handler(struct bfd_session *bs, int nstate);
 void sbfd_initiator_state_handler(struct bfd_session *bs, int nstate);
 
 struct bfd_session *bfd_session_get_by_name(const char *name);
+
+/*
+ * ptm_adapter.c: RFC 7130 micro-BFD requests to zebra.
+ */
+bool bfdd_zclient_ready(void);
+int bfdd_zclient_lag_register(vrf_id_t vrf_id, ifindex_t bond_ifindex, bool reg);
+int bfdd_zclient_lag_dist_set(vrf_id_t vrf_id, ifindex_t bond_ifindex, ifindex_t mbr_ifindex,
+			      bool enable);
 
 /*
  * Permitted VRF Configuration for BFD Sessions.

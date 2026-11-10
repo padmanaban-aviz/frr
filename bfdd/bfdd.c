@@ -16,6 +16,7 @@
 
 #include "bfd.h"
 #include "bfd_trace.h"
+#include "bfd_lag.h"
 #include "bfdd_nb.h"
 #include "bfddp_packet.h"
 #include "lib/version.h"
@@ -71,6 +72,9 @@ static FRR_NORETURN void sigterm_handler(void)
 
 	/* Stop receiving message from zebra. */
 	bfdd_zclient_stop();
+
+	/* Zebra re-attaches the LAG members micro-BFD took out. */
+	bfd_lag_terminate();
 
 	keychain_terminate();
 
@@ -323,6 +327,7 @@ int main(int argc, char *argv[])
 
 	/* Initialize BFD data structures. */
 	bfd_initialize();
+	bfd_lag_init();
 
 	bfd_vrf_init(perm_vrfs);
 

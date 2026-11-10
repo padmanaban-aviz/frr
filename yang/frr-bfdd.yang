@@ -52,6 +52,17 @@ module frr-bfdd {
      (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
      OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
 
+  revision 2026-11-10 {
+    description
+      "Add RFC 7130 micro-BFD on LAG (bond) members. Leaf names follow
+       the ietf-bfd-lag module of RFC 9314 where they overlap.";
+    reference
+      "RFC 7130: Bidirectional Forwarding Detection (BFD) on Link
+                 Aggregation Group (LAG) Interfaces.
+       RFC 9314: YANG Data Model for Bidirectional Forwarding Detection
+                 (BFD).";
+  }
+
   revision 2025-03-03 {
     description "Add log-session-changes leaf";
     reference
@@ -714,6 +725,162 @@ module frr-bfdd {
             config false;
             description
               "This container provides statistics for sessions.";
+          }
+        }
+      }
+
+      container lag {
+        description
+          "RFC 7130 micro-BFD: one BFD session on every member link of a
+           LAG (Linux bond, 802.3ad or balance-xor). A member carries the
+           LAG's traffic only while its session is Up. Names follow the
+           ietf-bfd-lag module (RFC 9314) where they overlap; timers and
+           authentication come from the BFD profile.";
+        reference
+          "RFC 7130, RFC 9314 (ietf-bfd-lag)";
+
+        list session {
+          key "lag-name";
+          description "Micro-BFD configuration of one LAG.";
+
+          leaf lag-name {
+            type frr-interface:interface-ref;
+            description "LAG (bond) interface.";
+          }
+
+          leaf use-ipv4 {
+            type boolean;
+            default "false";
+            must ". = 'false' or ../ipv4-dest-addr" {
+              error-message "use-ipv4 needs ipv4-dest-addr";
+            }
+            description
+              "Run IPv4 micro-BFD sessions on the LAG's member links.";
+          }
+
+          leaf ipv4-dest-addr {
+            type inet:ipv4-address;
+            description "IPv4 address of the peer's LAG.";
+          }
+
+          leaf ipv4-source-addr {
+            type inet:ipv4-address;
+            description
+              "IPv4 source address of the sessions (FRR extension).
+               Default: the primary IPv4 address of the LAG.";
+          }
+
+          leaf admin-down {
+            type boolean;
+            default "false";
+            description
+              "Administratively disable the sessions. Members are not
+               kept out of the LAG while disabled.";
+          }
+
+          leaf profile {
+            type profile-ref;
+            description
+              "BFD profile for timers, multiplier and authentication
+               (FRR extension). Echo, demand and passive settings of the
+               profile don't apply: micro-BFD is Asynchronous mode only.";
+          }
+
+          leaf mode {
+            type enumeration {
+              enum strict {
+                value 0;
+                description
+                  "A member carries traffic only while its session is
+                   Up.";
+              }
+            }
+            default "strict";
+            description "How session state controls the members (FRR extension).";
+          }
+
+          leaf enable-grace {
+            type uint32 {
+              range "0..60000";
+            }
+            units "milliseconds";
+            default "3000";
+            description
+              "Time a new session gets to come Up before its member is
+               taken out of the LAG (FRR extension).";
+          }
+
+          leaf hold-up {
+            type uint32 {
+              range "0..60000";
+            }
+            units "milliseconds";
+            default "0";
+            description
+              "Time a session must stay Up before its member is put back
+               into the LAG (FRR extension).";
+          }
+
+          list member-links {
+            key "member-link";
+            config false;
+            description "Member links running a micro-BFD session.";
+
+            leaf member-link {
+              type frr-interface:interface-ref;
+              description "Member interface.";
+            }
+
+            leaf detached {
+              type boolean;
+              description "Taken out of the LAG by micro-BFD (FRR extension).";
+            }
+
+            leaf distributing {
+              type boolean;
+              description "Carries the LAG's traffic (FRR extension).";
+            }
+
+            leaf reason {
+              type string;
+              description
+                "Why the member is in its state, when not simply Up and
+                 distributing (FRR extension).";
+            }
+
+            container micro-bfd-ipv4 {
+              description "IPv4 micro-BFD session on the member.";
+              uses session-states;
+            }
+          }
+        }
+
+        container micro-bfd-ipv4-session-statistics {
+          config false;
+          description "IPv4 micro-BFD session counts.";
+
+          container summary {
+            description "Session counts by state.";
+
+            leaf number-of-sessions {
+              type yang:gauge32;
+              description "Sessions.";
+            }
+
+            leaf number-of-sessions-up {
+              type yang:gauge32;
+              description "Sessions Up.";
+            }
+
+            leaf number-of-sessions-down {
+              type yang:gauge32;
+              description "Sessions Down or Init.";
+            }
+
+            leaf number-of-sessions-admin-down {
+              type yang:gauge32;
+              description "Sessions AdminDown.";
+            }
           }
         }
       }

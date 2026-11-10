@@ -264,4 +264,41 @@ int bfdd_bfd_sessions_bfd_mode_destroy(struct nb_cb_destroy_args *args);
 int bfdd_bfd_sessions_segment_list_create(struct nb_cb_create_args *args);
 int bfdd_bfd_sessions_segment_list_destroy(struct nb_cb_destroy_args *args);
 
+
+/* RFC 7130 micro-BFD (bfdd_nb_lag.c). */
+int bfdd_bfd_lag_session_create(struct nb_cb_create_args *args);
+int bfdd_bfd_lag_session_destroy(struct nb_cb_destroy_args *args);
+void bfdd_bfd_lag_session_apply_finish(struct nb_cb_apply_finish_args *args);
+const void *bfdd_bfd_lag_session_get_next(struct nb_cb_get_next_args *args);
+int bfdd_bfd_lag_session_get_keys(struct nb_cb_get_keys_args *args);
+const void *bfdd_bfd_lag_session_lookup_entry(struct nb_cb_lookup_entry_args *args);
+int bfdd_bfd_lag_session_use_ipv4_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_ipv4_dest_addr_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_ipv4_dest_addr_destroy(struct nb_cb_destroy_args *args);
+int bfdd_bfd_lag_session_ipv4_source_addr_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_ipv4_source_addr_destroy(struct nb_cb_destroy_args *args);
+int bfdd_bfd_lag_session_admin_down_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_profile_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_profile_destroy(struct nb_cb_destroy_args *args);
+int bfdd_bfd_lag_session_mode_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_enable_grace_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_hold_up_modify(struct nb_cb_modify_args *args);
+const void *bfdd_bfd_lag_session_member_links_get_next(struct nb_cb_get_next_args *args);
+int bfdd_bfd_lag_session_member_links_get_keys(struct nb_cb_get_keys_args *args);
+const void *bfdd_bfd_lag_session_member_links_lookup_entry(struct nb_cb_lookup_entry_args *args);
+struct yang_data *
+bfdd_bfd_lag_session_member_links_member_link_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_session_member_links_detached_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_session_member_links_distributing_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_session_member_links_reason_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_stats_sessions_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_stats_sessions_up_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_stats_sessions_down_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_stats_sessions_admin_down_get_elem(struct nb_cb_get_elem_args *args);
+void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
+void bfd_cli_show_lag_end(struct vty *vty, const struct lyd_node *dnode);
+
 #endif /* _FRR_BFDD_NB_H_ */

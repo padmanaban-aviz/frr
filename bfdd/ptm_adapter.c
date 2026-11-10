@@ -15,6 +15,7 @@
 #include "lib/bfd.h"
 
 #include "bfd.h"
+#include "bfd_lag.h"
 #include "bfd_trace.h"
 
 /*
@@ -188,6 +189,15 @@ static int _ptm_msg_address(struct stream *msg, int family, const void *addr)
 int ptm_bfd_notify(struct bfd_session *bs, uint8_t notify_state)
 {
 	struct stream *msg;
+
+	/*
+	 * RFC 7130 micro-BFD sessions have no protocol clients: their state
+	 * decides whether the member carries the LAG's traffic.
+	 */
+	if (bs->bfd_mode == BFD_MODE_TYPE_MICRO_BFD) {
+		bfd_lag_session_notify(bs, notify_state);
+		return 0;
+	}
 
 	bs->stats.znotification++;
 
@@ -673,6 +683,9 @@ static void bfdd_zebra_connected(struct zclient *zc)
 
 	/* Send requests. */
 	zclient_send_message(zc);
+
+	/* RFC 7130 micro-BFD: register the LAGs (again). */
+	bfd_lag_zebra_connected();
 }
 
 static void bfdd_sessions_enable_interface(struct interface *ifp)
@@ -783,6 +796,7 @@ static int bfd_ifp_destroy(struct interface *ifp)
 		 ifp->vrf->name);
 
 	bfdd_sessions_disable_interface(ifp);
+	bfd_lag_if_del(ifp);
 
 	return 0;
 }
@@ -828,10 +842,15 @@ static int bfdd_interface_address_update(ZAPI_CALLBACK_ARGS)
 		 ifc->address->family, ifc->ifp->ifindex, vrf_id,
 		 (uint8_t *)&ifc->address->u.prefix, ifc->address->prefixlen);
 
-	if (cmd == ZEBRA_INTERFACE_ADDRESS_ADD)
+	if (cmd == ZEBRA_INTERFACE_ADDRESS_ADD) {
 		bfdd_sessions_enable_address(ifc);
-	else
+		bfd_lag_if_address(ifc->ifp);
+	} else {
+		struct interface *ifp = ifc->ifp;
+
 		connected_free(&ifc);
+		bfd_lag_if_address(ifp);
+	}
 
 	return 0;
 }
@@ -846,6 +865,72 @@ static int bfd_ifp_create(struct interface *ifp)
 		 ifp->vrf->name);
 
 	bfdd_sessions_enable_interface(ifp);
+	bfd_lag_if_add(ifp);
+
+	return 0;
+}
+
+/*
+ * RFC 7130 micro-BFD: bond and member state from zebra.
+ */
+static int bfdd_lag_bond_status(ZAPI_CALLBACK_ARGS)
+{
+	struct zapi_lag_bond_status st;
+
+	if (zapi_lag_bond_status_decode(zclient->ibuf, &st) < 0) {
+		zlog_warn("micro-BFD: malformed bond status from zebra");
+		return -1;
+	}
+
+	bfd_lag_zebra_bond_status(vrf_id, &st);
+	return 0;
+}
+
+static int bfdd_lag_member_update(ZAPI_CALLBACK_ARGS)
+{
+	struct zapi_lag_member zm;
+
+	if (zapi_lag_member_decode(zclient->ibuf, &zm) < 0) {
+		zlog_warn("micro-BFD: malformed member update from zebra");
+		return -1;
+	}
+
+	bfd_lag_zebra_member(vrf_id, &zm);
+	return 0;
+}
+
+bool bfdd_zclient_ready(void)
+{
+	return bfd_zclient && bfd_zclient->sock >= 0;
+}
+
+int bfdd_zclient_lag_register(vrf_id_t vrf_id, ifindex_t bond_ifindex, bool reg)
+{
+	if (!bfdd_zclient_ready())
+		return -1;
+
+	/* Members micro-BFD took out go back in when bfdd goes away. */
+	if (zclient_lag_mbfd_register(bfd_zclient, reg, vrf_id, bond_ifindex,
+				      ZAPI_LAG_REG_F_FAIL_OPEN) == ZCLIENT_SEND_FAILURE)
+		return -1;
+
+	return 0;
+}
+
+int bfdd_zclient_lag_dist_set(vrf_id_t vrf_id, ifindex_t bond_ifindex, ifindex_t mbr_ifindex,
+			      bool enable)
+{
+	struct zapi_lag_dist dist = {
+		.bond_ifindex = bond_ifindex,
+		.mbr_ifindex = mbr_ifindex,
+		.enable = enable,
+	};
+
+	if (!bfdd_zclient_ready())
+		return -1;
+
+	if (zclient_lag_mbfd_dist_set(bfd_zclient, vrf_id, &dist) == ZCLIENT_SEND_FAILURE)
+		return -1;
 
 	return 0;
 }
@@ -861,6 +946,10 @@ static zclient_handler *const bfd_handlers[] = {
 	/* Learn about new addresses being registered. */
 	[ZEBRA_INTERFACE_ADDRESS_ADD] = bfdd_interface_address_update,
 	[ZEBRA_INTERFACE_ADDRESS_DELETE] = bfdd_interface_address_update,
+
+	/* RFC 7130 micro-BFD bond members. */
+	[ZEBRA_LAG_MBFD_BOND_STATUS] = bfdd_lag_bond_status,
+	[ZEBRA_LAG_MBFD_MEMBER_UPDATE] = bfdd_lag_member_update,
 };
 
 void bfdd_zclient_init(struct zebra_privs_t *bfdd_priv)
