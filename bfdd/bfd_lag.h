@@ -35,8 +35,9 @@ struct bfd_vrf_global;
 #define BFD_LAG_NAME_PREFIX "lag:"
 
 /* Defaults, milliseconds. */
-#define BFD_LAG_ENABLE_GRACE_DEF 3000
-#define BFD_LAG_HOLD_UP_DEF	 0
+#define BFD_LAG_ENABLE_GRACE_DEF    3000
+#define BFD_LAG_HOLD_UP_DEF	    0
+#define BFD_LAG_ADMIN_DOWN_HOLD_DEF 0 /* keep the member as long as AdminDown lasts */
 
 /*
  * A re-attached member bounces its link: the bonding driver needs it down
@@ -59,6 +60,16 @@ struct bfd_vrf_global;
 
 enum bfd_lag_mode {
 	BFD_LAG_MODE_STRICT = 0,
+};
+
+/*
+ * What zebra does with the members bfdd took out when bfdd goes away
+ * (crash or stop): put them back (open) or keep them out until bfdd
+ * returns (closed). Removing the configuration always puts them back.
+ */
+enum bfd_lag_fail_mode {
+	BFD_LAG_FAIL_OPEN = 0,
+	BFD_LAG_FAIL_CLOSED,
 };
 
 /* Address families a LAG runs micro-BFD in, one session each per member. */
@@ -111,6 +122,10 @@ struct bfd_lag_msess {
 	uint16_t sport;
 	struct event *t_read;
 	bool peer_admin_down;
+	/* admin-down-hold: when AdminDown came, and whether the hold is over. */
+	struct timeval admin_down_at;
+	bool admin_hold_expired;
+	struct event *t_admin_hold;
 };
 
 struct bfd_lag_member {
@@ -156,6 +171,9 @@ struct bfd_lag {
 	enum bfd_lag_mode mode;
 	uint32_t enable_grace; /* ms */
 	uint32_t hold_up;      /* ms */
+	enum bfd_lag_fail_mode fail_mode;
+	uint32_t admin_down_hold; /* ms, 0: as long as AdminDown lasts */
+	bool fail_mode_warned;	  /* "open on a balance-xor bond" logged */
 
 	/* Bond, once it exists. */
 	ifindex_t ifindex;
@@ -192,6 +210,8 @@ void bfd_lag_set_profile(struct bfd_lag *lag, const char *profile);
 void bfd_lag_set_mode(struct bfd_lag *lag, enum bfd_lag_mode mode);
 void bfd_lag_set_enable_grace(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_set_hold_up(struct bfd_lag *lag, uint32_t ms);
+void bfd_lag_set_fail_mode(struct bfd_lag *lag, enum bfd_lag_fail_mode mode);
+void bfd_lag_set_admin_down_hold(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_apply(struct bfd_lag *lag);
 
 /* Zebra events (ptm_adapter.c). */
@@ -228,6 +248,7 @@ void bfd_lag_show_statistics(struct vty *vty, bool use_json);
 void bfd_lag_vrf_disable(struct bfd_vrf_global *bvrf);
 
 const char *bfd_lag_mode2str(enum bfd_lag_mode mode);
+const char *bfd_lag_fail_mode2str(enum bfd_lag_fail_mode mode);
 
 #ifdef __cplusplus
 }

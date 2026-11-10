@@ -1181,6 +1181,18 @@ const struct frr_yang_module_info frr_bfdd_info = {
 			}
 		},
 		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/failure-mode",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_failure_mode_modify,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/admin-down-hold",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_admin_down_hold_modify,
+			}
+		},
+		{
 			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/member-links",
 			.cbs = {
 				.get_next = bfdd_bfd_lag_session_member_links_get_next,

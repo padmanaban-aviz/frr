@@ -247,6 +247,31 @@ int bfdd_bfd_lag_session_hold_up_modify(struct nb_cb_modify_args *args)
 }
 
 /*
+ * XPath: /frr-bfdd:bfdd/bfd/lag/session/failure-mode
+ */
+int bfdd_bfd_lag_session_failure_mode_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	bfd_lag_set_fail_mode(lag_entry(args->dnode), yang_dnode_get_enum(args->dnode, NULL));
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-bfdd:bfdd/bfd/lag/session/admin-down-hold
+ */
+int bfdd_bfd_lag_session_admin_down_hold_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	bfd_lag_set_admin_down_hold(lag_entry(args->dnode),
+				    yang_dnode_get_uint32(args->dnode, NULL));
+	return NB_OK;
+}
+
+/*
  * Operational state.
  *
  * XPath: /frr-bfdd:bfdd/bfd/lag/session

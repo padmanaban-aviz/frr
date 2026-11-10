@@ -1580,6 +1580,46 @@ DEFPY_YANG(no_bfd_lag_hold_up, no_bfd_lag_hold_up_cmd,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG(bfd_lag_failure_mode, bfd_lag_failure_mode_cmd,
+	"failure-mode <open|closed>$mode",
+	"What happens to members micro-BFD took out when bfdd goes away\n"
+	"Zebra puts them back (default)\n"
+	"They stay out until bfdd is back (static and balance-xor bonds)\n")
+{
+	nb_cli_enqueue_change(vty, "./failure-mode", NB_OP_MODIFY, mode);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_failure_mode, no_bfd_lag_failure_mode_cmd,
+	"no failure-mode [<open|closed>]",
+	NO_STR
+	"What happens to members micro-BFD took out when bfdd goes away\n"
+	"Zebra puts them back (default)\n"
+	"They stay out until bfdd is back (static and balance-xor bonds)\n")
+{
+	nb_cli_enqueue_change(vty, "./failure-mode", NB_OP_MODIFY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(bfd_lag_admin_down_hold, bfd_lag_admin_down_hold_cmd,
+	"admin-down-hold (0-3600000)$ms",
+	"How long a member is kept when the peer signals AdminDown\n"
+	"Milliseconds (0: as long as AdminDown lasts)\n")
+{
+	nb_cli_enqueue_change(vty, "./admin-down-hold", NB_OP_MODIFY, ms_str);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_admin_down_hold, no_bfd_lag_admin_down_hold_cmd,
+	"no admin-down-hold [(0-3600000)]",
+	NO_STR
+	"How long a member is kept when the peer signals AdminDown\n"
+	"Milliseconds (0: as long as AdminDown lasts)\n")
+{
+	nb_cli_enqueue_change(vty, "./admin-down-hold", NB_OP_MODIFY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
 void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_defaults)
 {
 	vty_out(vty, " lag %s\n", yang_dnode_get_string(dnode, "lag-name"));
@@ -1608,6 +1648,13 @@ void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_d
 
 	if (show_defaults || !yang_dnode_is_default(dnode, "hold-up"))
 		vty_out(vty, "  hold-up %u\n", yang_dnode_get_uint32(dnode, "hold-up"));
+
+	if (show_defaults || !yang_dnode_is_default(dnode, "failure-mode"))
+		vty_out(vty, "  failure-mode %s\n", yang_dnode_get_string(dnode, "failure-mode"));
+
+	if (show_defaults || !yang_dnode_is_default(dnode, "admin-down-hold"))
+		vty_out(vty, "  admin-down-hold %u\n",
+			yang_dnode_get_uint32(dnode, "admin-down-hold"));
 
 	if (yang_dnode_get_bool(dnode, "admin-down"))
 		vty_out(vty, "  shutdown\n");
@@ -1766,4 +1813,8 @@ bfdd_cli_init(void)
 	install_element(BFD_LAG_NODE, &no_bfd_lag_enable_grace_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_hold_up_cmd);
 	install_element(BFD_LAG_NODE, &no_bfd_lag_hold_up_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_failure_mode_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_failure_mode_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_admin_down_hold_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_admin_down_hold_cmd);
 }

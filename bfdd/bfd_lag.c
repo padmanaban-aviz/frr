@@ -38,7 +38,14 @@
  *   ignored until the member distributes with its sessions Up, for at most
  *   BFD_LAG_SETTLE_MAX.
  * - Shutdown, or a peer signalling AdminDown in every family (RFC 5882,
- *   Section 3.2): not a failure, members are attached (fail-open).
+ *   Section 3.2): not a failure, members are attached (fail-open). With
+ *   admin-down-hold, a family whose peer signals AdminDown is left out of
+ *   the decision only that long; then it counts as Down.
+ *
+ * failure-mode tells zebra what to do with detached members when bfdd goes
+ * away: put them back (open, the default) or keep them out until bfdd is
+ * back (closed, for static and balance-xor bonds, where nothing like LACP
+ * keeps our side from sending on a member the peer still keeps out).
  *
  * Copyright (C) 2026 Aviz Networks
  */
@@ -81,6 +88,21 @@ static void lag_addr_update(struct bfd_lag *lag, bool confirm);
 		if (bglobal.debug_lag)                                                            \
 			zlog_debug("micro-BFD: " fmt, ##__VA_ARGS__);                             \
 	} while (0)
+
+/* Kernel bond mode balance-xor (IFLA_BOND_MODE). */
+#define BFD_LAG_KERNEL_BOND_XOR 2
+
+const char *bfd_lag_fail_mode2str(enum bfd_lag_fail_mode mode)
+{
+	switch (mode) {
+	case BFD_LAG_FAIL_OPEN:
+		return "open";
+	case BFD_LAG_FAIL_CLOSED:
+		return "closed";
+	}
+
+	return "unknown";
+}
 
 const char *bfd_lag_mode2str(enum bfd_lag_mode mode)
 {
@@ -332,6 +354,30 @@ static const char *lag_no_session_reason(const struct bfd_lag *lag)
 }
 
 /*
+ * failure-mode open on a balance-xor bond: when bfdd goes away, zebra puts
+ * back members a peer may still keep out, and nothing (no LACP) stops our
+ * side from sending on them.
+ */
+static bool lag_fail_mode_risky(const struct bfd_lag *lag)
+{
+	return lag->fail_mode == BFD_LAG_FAIL_OPEN && lag->status_known &&
+	       lag->status == ZAPI_LAG_BOND_OK && lag->bond_mode == BFD_LAG_KERNEL_BOND_XOR;
+}
+
+static void lag_fail_mode_check(struct bfd_lag *lag)
+{
+	if (!lag_fail_mode_risky(lag)) {
+		lag->fail_mode_warned = false;
+		return;
+	}
+	if (lag->fail_mode_warned)
+		return;
+	zlog_warn("micro-BFD: lag %s: failure-mode open on a balance-xor bond: if bfdd stops, members the peer keeps out are put back and can drop traffic; consider failure-mode closed",
+		  lag->name);
+	lag->fail_mode_warned = true;
+}
+
+/*
  * Zebra registration.
  */
 static void lag_register(struct bfd_lag *lag)
@@ -339,14 +385,16 @@ static void lag_register(struct bfd_lag *lag)
 	if (lag->registered || lag->ifindex == IFINDEX_INTERNAL || !bfdd_zclient_ready())
 		return;
 
-	if (bfdd_zclient_lag_register(lag->vrf_id, lag->ifindex, true) != 0) {
+	if (bfdd_zclient_lag_register(lag->vrf_id, lag->ifindex, true,
+				      lag->fail_mode == BFD_LAG_FAIL_OPEN) != 0) {
 		zlog_warn("micro-BFD: lag %s: can't register with zebra", lag->name);
 		return;
 	}
 
 	lag->registered = true;
 	lag->registered_ifindex = lag->ifindex;
-	LAG_DEBUG("lag %s: registered bond ifindex %u", lag->name, lag->ifindex);
+	LAG_DEBUG("lag %s: registered bond ifindex %u (fail-%s)", lag->name, lag->ifindex,
+		  bfd_lag_fail_mode2str(lag->fail_mode));
 }
 
 static void lag_unregister(struct bfd_lag *lag)
@@ -355,7 +403,7 @@ static void lag_unregister(struct bfd_lag *lag)
 		return;
 
 	if (bfdd_zclient_ready())
-		bfdd_zclient_lag_register(lag->vrf_id, lag->registered_ifindex, false);
+		bfdd_zclient_lag_register(lag->vrf_id, lag->registered_ifindex, false, true);
 
 	LAG_DEBUG("lag %s: unregistered bond ifindex %u", lag->name, lag->registered_ifindex);
 	lag->registered = false;
@@ -452,6 +500,56 @@ static void lag_member_grace_start(struct bfd_lag_member *m)
 		event_add_timer_msec(master, lag_grace_cb, m, lag->enable_grace, &m->t_grace);
 }
 
+/*
+ * admin-down-hold: how long a family whose peer signals AdminDown stays out
+ * of the decision.
+ */
+static void lag_admin_hold_cb(struct event *t)
+{
+	struct bfd_lag_msess *ms = EVENT_ARG(t);
+	struct bfd_lag_member *m = ms->m;
+
+	ms->admin_hold_expired = true;
+	zlog_info("micro-BFD: lag %s member %s: %s peer AdminDown for %u ms, hold over",
+		  m->lag->name, m->name, af_name(ms->af), m->lag->admin_down_hold);
+	lag_member_evaluate(m);
+}
+
+static void lag_admin_hold_stop(struct bfd_lag_msess *ms)
+{
+	event_cancel(&ms->t_admin_hold);
+	ms->admin_hold_expired = false;
+}
+
+/*
+ * (Re)arm the hold of a session whose peer signals AdminDown, measured
+ * from when AdminDown came: a new admin-down-hold applies to a hold
+ * already running.
+ */
+static void lag_admin_hold_arm(struct bfd_lag_msess *ms)
+{
+	uint32_t hold = ms->m->lag->admin_down_hold;
+	int64_t elapsed;
+
+	event_cancel(&ms->t_admin_hold);
+	ms->admin_hold_expired = false;
+	if (!ms->peer_admin_down || !hold)
+		return;
+
+	elapsed = monotime_since(&ms->admin_down_at, NULL) / 1000;
+	if (elapsed >= hold) {
+		ms->admin_hold_expired = true;
+		return;
+	}
+	event_add_timer_msec(master, lag_admin_hold_cb, ms, hold - elapsed, &ms->t_admin_hold);
+}
+
+/* Milliseconds left of a running hold, 0 if none. */
+static uint32_t lag_admin_hold_left(const struct bfd_lag_msess *ms)
+{
+	return ms->t_admin_hold ? event_timer_remain_msec(ms->t_admin_hold) : 0;
+}
+
 static void lag_member_session_create(struct bfd_lag_member *m, enum bfd_lag_af af)
 {
 	struct bfd_lag *lag = m->lag;
@@ -530,6 +628,7 @@ static void lag_member_session_delete(struct bfd_lag_member *m, enum bfd_lag_af 
 	bfd_session_free(bs);
 	m->s[af].bs = NULL;
 	m->s[af].peer_admin_down = false;
+	lag_admin_hold_stop(&m->s[af]);
 
 	if (!lag_member_has_session(m)) {
 		m->in_grace = false;
@@ -898,6 +997,7 @@ static void lag_recv_cb(struct event *t);
 static void lag_msess_close(struct bfd_lag_msess *ms)
 {
 	event_cancel(&ms->t_read);
+	lag_admin_hold_stop(ms);
 	if (ms->port_sock != -1) {
 		close(ms->port_sock);
 		ms->port_sock = -1;
@@ -1269,6 +1369,8 @@ static const char *lag_down_reason(const struct bfd_lag_member *m, const bool *d
 			continue;
 		if (lag_session_auth_broken(bs))
 			return "auth: no usable key";
+		if (m->s[af].admin_hold_expired)
+			return "peer AdminDown, hold expired";
 		if (af == BFD_LAG_AF_IPV6)
 			v6 = true;
 		else
@@ -1318,7 +1420,8 @@ static void lag_member_evaluate(struct bfd_lag_member *m)
 			shut = true;
 			continue;
 		}
-		if (ms->peer_admin_down && ms->bs->ses_state != PTM_BFD_UP) {
+		if (ms->peer_admin_down && ms->bs->ses_state != PTM_BFD_UP &&
+		    !ms->admin_hold_expired) {
 			peer_admin = true;
 			continue;
 		}
@@ -1411,16 +1514,17 @@ void bfd_lag_session_notify(struct bfd_session *bs, uint8_t state)
 	ms = &m->s[af_of_session(bs)];
 
 	switch (state) {
-	case PTM_BFD_UP:
-		ms->peer_admin_down = false;
-		break;
 	case PTM_BFD_ADM_DOWN:
 		/* Local shutdown has the session AdminDown itself. */
-		if (bs->ses_state != PTM_BFD_ADM_DOWN)
+		if (bs->ses_state != PTM_BFD_ADM_DOWN && !ms->peer_admin_down) {
 			ms->peer_admin_down = true;
+			monotime(&ms->admin_down_at);
+			lag_admin_hold_arm(ms);
+		}
 		break;
 	default:
 		ms->peer_admin_down = false;
+		lag_admin_hold_stop(ms);
 		break;
 	}
 
@@ -1507,6 +1611,7 @@ void bfd_lag_zebra_bond_status(vrf_id_t vrf_id, const struct zapi_lag_bond_statu
 		return;
 	}
 
+	lag_fail_mode_check(lag);
 	lag_sessions_sync(lag);
 }
 
@@ -1695,13 +1800,18 @@ struct bfd_lag *bfd_lag_new(const char *name)
 	lag->mode = BFD_LAG_MODE_STRICT;
 	lag->enable_grace = BFD_LAG_ENABLE_GRACE_DEF;
 	lag->hold_up = BFD_LAG_HOLD_UP_DEF;
+	lag->fail_mode = BFD_LAG_FAIL_OPEN;
+	lag->admin_down_hold = BFD_LAG_ADMIN_DOWN_HOLD_DEF;
 	lag->ifindex = IFINDEX_INTERNAL;
 	lag->vrf_id = VRF_DEFAULT;
 	bfd_lag_members_init(&lag->members);
 	bfd_lags_add_tail(&bfd_lags, lag);
 
-	lag_resolve(lag);
-
+	/*
+	 * Registered with zebra in bfd_lag_apply(), once the whole
+	 * configuration is in: zebra must not see a failure-mode the
+	 * configuration doesn't have, nor members before the addresses.
+	 */
 	return lag;
 }
 
@@ -1823,6 +1933,38 @@ void bfd_lag_set_enable_grace(struct bfd_lag *lag, uint32_t ms)
 void bfd_lag_set_hold_up(struct bfd_lag *lag, uint32_t ms)
 {
 	lag->hold_up = ms;
+}
+
+void bfd_lag_set_fail_mode(struct bfd_lag *lag, enum bfd_lag_fail_mode mode)
+{
+	if (lag->fail_mode == mode)
+		return;
+	lag->fail_mode = mode;
+
+	/* Zebra takes the new flags from a second registration, in place. */
+	if (lag->registered && bfdd_zclient_lag_register(lag->vrf_id, lag->registered_ifindex,
+							 true, mode == BFD_LAG_FAIL_OPEN) != 0)
+		zlog_warn("micro-BFD: lag %s: can't tell zebra failure-mode %s", lag->name,
+			  bfd_lag_fail_mode2str(mode));
+	LAG_DEBUG("lag %s: failure-mode %s", lag->name, bfd_lag_fail_mode2str(mode));
+	lag_fail_mode_check(lag);
+}
+
+void bfd_lag_set_admin_down_hold(struct bfd_lag *lag, uint32_t ms)
+{
+	struct bfd_lag_member *m;
+
+	if (lag->admin_down_hold == ms)
+		return;
+	lag->admin_down_hold = ms;
+
+	/* Holds running (or over) follow the new value. */
+	frr_each (bfd_lag_members, &lag->members, m) {
+		for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++)
+			if (m->s[af].bs && m->s[af].peer_admin_down)
+				lag_admin_hold_arm(&m->s[af]);
+		lag_member_evaluate(m);
+	}
 }
 
 /* After a configuration change: start, stop or re-evaluate sessions. */
@@ -1963,6 +2105,8 @@ static json_object *lag_session_json(const struct bfd_lag_msess *ms)
 	json_object_int_add(js, "detectionTime", bs->detect_TO / 1000);
 	json_object_int_add(js, "sourcePort", ms->sport);
 	json_object_boolean_add(js, "peerAdminDown", ms->peer_admin_down);
+	json_object_int_add(js, "adminDownHoldRemaining", lag_admin_hold_left(ms));
+	json_object_boolean_add(js, "adminDownHoldExpired", ms->admin_hold_expired);
 	json_object_int_add(js, "sessionUpCount", bs->stats.session_up);
 	json_object_int_add(js, "sessionDownCount", bs->stats.session_down);
 	json_object_int_add(js, "controlPacketInputCount", bs->stats.rx_ctrl_pkt);
@@ -2026,6 +2170,11 @@ static void lag_member_show(struct vty *vty, struct bfd_lag_member *m, json_obje
 			bs->discrs.remote_discr, state_list[bs->remote_ses_state].str,
 			bs->detect_mult, bs->remote_detect_mult, (uint32_t)(bs->detect_TO / 1000),
 			ms->sport, ms->peer_admin_down ? ", peer AdminDown" : "");
+		if (ms->t_admin_hold)
+			vty_out(vty, "        admin-down-hold: %u ms left\n",
+				lag_admin_hold_left(ms));
+		else if (ms->admin_hold_expired)
+			vty_out(vty, "        admin-down-hold: over\n");
 		vty_out(vty, "        diagnostics: local %s, remote %s\n",
 			diag2str(bs->local_diag), diag2str(bs->remote_diag));
 	}
@@ -2103,11 +2252,16 @@ static void lag_show_one(struct vty *vty, struct bfd_lag *lag, json_object *json
 			json_object_string_add(jl, "profile", lag->profile_name);
 		json_object_int_add(jl, "enableGrace", lag->enable_grace);
 		json_object_int_add(jl, "holdUp", lag->hold_up);
+		json_object_string_add(jl, "failureMode", bfd_lag_fail_mode2str(lag->fail_mode));
+		json_object_int_add(jl, "adminDownHold", lag->admin_down_hold);
 		json_object_string_add(jl, "noSessionReason", no_session ? no_session : "");
 		if (detect && detect < BFD_LAG_MIN_DETECT_WARN)
 			json_object_string_addf(jl, "warning",
 						"detection time %u ms is below %u ms", detect,
 						BFD_LAG_MIN_DETECT_WARN);
+		if (lag_fail_mode_risky(lag))
+			json_object_string_add(jl, "failureModeWarning",
+					       "failure-mode open on a balance-xor bond");
 		frr_each (bfd_lag_members, &lag->members, m) {
 			json_object *jm = json_object_new_object();
 
@@ -2138,6 +2292,12 @@ static void lag_show_one(struct vty *vty, struct bfd_lag *lag, json_object *json
 	}
 	vty_out(vty, "  profile %s, enable-grace %u ms, hold-up %u ms\n",
 		lag->profile_name ? lag->profile_name : "-", lag->enable_grace, lag->hold_up);
+	vty_out(vty, "  failure-mode %s, admin-down-hold %u ms%s\n",
+		bfd_lag_fail_mode2str(lag->fail_mode), lag->admin_down_hold,
+		lag->admin_down_hold ? "" : " (as long as AdminDown lasts)");
+	if (lag_fail_mode_risky(lag))
+		vty_out(vty,
+			"  warning: failure-mode open on a balance-xor bond; if bfdd stops, members the peer keeps out are put back\n");
 	if (no_session)
 		vty_out(vty, "  no sessions: %s\n", no_session);
 	if (detect && detect < BFD_LAG_MIN_DETECT_WARN)

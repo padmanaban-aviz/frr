@@ -288,6 +288,8 @@ int bfdd_bfd_lag_session_profile_destroy(struct nb_cb_destroy_args *args);
 int bfdd_bfd_lag_session_mode_modify(struct nb_cb_modify_args *args);
 int bfdd_bfd_lag_session_enable_grace_modify(struct nb_cb_modify_args *args);
 int bfdd_bfd_lag_session_hold_up_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_failure_mode_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_admin_down_hold_modify(struct nb_cb_modify_args *args);
 const void *bfdd_bfd_lag_session_member_links_get_next(struct nb_cb_get_next_args *args);
 int bfdd_bfd_lag_session_member_links_get_keys(struct nb_cb_get_keys_args *args);
 const void *bfdd_bfd_lag_session_member_links_lookup_entry(struct nb_cb_lookup_entry_args *args);

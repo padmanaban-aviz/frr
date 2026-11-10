@@ -1004,7 +1004,7 @@ struct bfd_session *bfd_session_get_by_name(const char *name);
  * ptm_adapter.c: RFC 7130 micro-BFD requests to zebra.
  */
 bool bfdd_zclient_ready(void);
-int bfdd_zclient_lag_register(vrf_id_t vrf_id, ifindex_t bond_ifindex, bool reg);
+int bfdd_zclient_lag_register(vrf_id_t vrf_id, ifindex_t bond_ifindex, bool reg, bool fail_open);
 int bfdd_zclient_lag_dist_set(vrf_id_t vrf_id, ifindex_t bond_ifindex, ifindex_t mbr_ifindex,
 			      bool enable);
 

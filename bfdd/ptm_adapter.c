@@ -904,14 +904,18 @@ bool bfdd_zclient_ready(void)
 	return bfd_zclient && bfd_zclient->sock >= 0;
 }
 
-int bfdd_zclient_lag_register(vrf_id_t vrf_id, ifindex_t bond_ifindex, bool reg)
+int bfdd_zclient_lag_register(vrf_id_t vrf_id, ifindex_t bond_ifindex, bool reg, bool fail_open)
 {
 	if (!bfdd_zclient_ready())
 		return -1;
 
-	/* Members micro-BFD took out go back in when bfdd goes away. */
+	/*
+	 * fail_open: members micro-BFD took out go back in when bfdd goes
+	 * away. Registering again only changes the flags.
+	 */
 	if (zclient_lag_mbfd_register(bfd_zclient, reg, vrf_id, bond_ifindex,
-				      ZAPI_LAG_REG_F_FAIL_OPEN) == ZCLIENT_SEND_FAILURE)
+				      fail_open ? ZAPI_LAG_REG_F_FAIL_OPEN : 0) ==
+	    ZCLIENT_SEND_FAILURE)
 		return -1;
 
 	return 0;
