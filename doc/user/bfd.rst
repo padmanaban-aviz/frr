@@ -896,11 +896,14 @@ Strict mode, the only mode for now, works like this for every member:
 - A member that is protodown is left alone.
 - ``shutdown``, or a peer signalling AdminDown, is not a failure (RFC 5882):
   members stay in, or are put back into, the bond. A family whose peer
-  signals AdminDown is left out of the decision. A session that ``bfdd``
+  signals AdminDown is left out of the decision, for ``admin-down-hold``
+  milliseconds if set, then it counts as down. A session that ``bfdd``
   deletes (configuration removed, address gone) tells its peer AdminDown
   first.
-- When ``bfdd`` stops, or the ``lag`` configuration is removed, ``zebra`` puts
-  the members ``bfdd`` took out back into the bond.
+- When the ``lag`` configuration is removed, ``zebra`` puts the members
+  ``bfdd`` took out back into the bond. When ``bfdd`` stops or fails, it
+  depends on ``failure-mode``: back in (``open``, the default) or kept out
+  until ``bfdd`` is back (``closed``).
 
 .. clicmd:: lag IFNAME
 
@@ -933,6 +936,27 @@ Strict mode, the only mode for now, works like this for every member:
 
    Time, in milliseconds, a session must stay Up before its member is put back
    into the bond. Keep it below 10 seconds. Default 0.
+
+.. clicmd:: failure-mode <open|closed>
+
+   What happens to the members micro-BFD took out of the bond when ``bfdd``
+   stops (also a planned stop or restart) or fails. ``open``: ``zebra`` puts
+   them back at once. ``closed``: they stay out until ``bfdd`` is back and
+   decides again; ``zebra`` keeps them out across its own restart too. Use
+   ``closed`` with ``balance-xor`` (static) bonds: without LACP, nothing keeps
+   this end from sending on a member the peer still keeps out.
+   ``show bfd lag`` warns about ``open`` on a ``balance-xor`` bond. With
+   ``closed``, remove the ``lag`` configuration before stopping ``bfdd`` for
+   good. Default ``open``.
+
+.. clicmd:: admin-down-hold (0-3600000)
+
+   Time, in milliseconds, a member is kept in the bond when the peer signals
+   AdminDown in a family (for example because its micro-BFD configuration
+   was removed); then the family counts as down and the member is taken out
+   until its session is Up again. ``0`` keeps the member as long as AdminDown
+   lasts. Use the same value on both ends (``timers nbr-unconfig`` on some
+   other implementations). Default 0.
 
 ``shutdown``
    Disable the sessions (AdminDown). Members are not kept out of the bond
