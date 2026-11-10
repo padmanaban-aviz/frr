@@ -2838,6 +2838,7 @@ static int bfd_vrf_new(struct vrf *vrf)
 	bvrf->bg_echov6 = -1;
 	bvrf->bg_initv6 = -1;
 	bvrf->bg_mbfd = -1;
+	bvrf->bg_mbfd6 = -1;
 
 	return 0;
 }

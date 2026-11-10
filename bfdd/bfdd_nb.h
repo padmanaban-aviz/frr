@@ -277,6 +277,11 @@ int bfdd_bfd_lag_session_ipv4_dest_addr_modify(struct nb_cb_modify_args *args);
 int bfdd_bfd_lag_session_ipv4_dest_addr_destroy(struct nb_cb_destroy_args *args);
 int bfdd_bfd_lag_session_ipv4_source_addr_modify(struct nb_cb_modify_args *args);
 int bfdd_bfd_lag_session_ipv4_source_addr_destroy(struct nb_cb_destroy_args *args);
+int bfdd_bfd_lag_session_use_ipv6_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_ipv6_dest_addr_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_ipv6_dest_addr_destroy(struct nb_cb_destroy_args *args);
+int bfdd_bfd_lag_session_ipv6_source_addr_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_lag_session_ipv6_source_addr_destroy(struct nb_cb_destroy_args *args);
 int bfdd_bfd_lag_session_admin_down_modify(struct nb_cb_modify_args *args);
 int bfdd_bfd_lag_session_profile_modify(struct nb_cb_modify_args *args);
 int bfdd_bfd_lag_session_profile_destroy(struct nb_cb_destroy_args *args);
@@ -294,10 +299,80 @@ struct yang_data *
 bfdd_bfd_lag_session_member_links_distributing_get_elem(struct nb_cb_get_elem_args *args);
 struct yang_data *
 bfdd_bfd_lag_session_member_links_reason_get_elem(struct nb_cb_get_elem_args *args);
-struct yang_data *bfdd_bfd_lag_stats_sessions_get_elem(struct nb_cb_get_elem_args *args);
-struct yang_data *bfdd_bfd_lag_stats_sessions_up_get_elem(struct nb_cb_get_elem_args *args);
-struct yang_data *bfdd_bfd_lag_stats_sessions_down_get_elem(struct nb_cb_get_elem_args *args);
-struct yang_data *bfdd_bfd_lag_stats_sessions_admin_down_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_ipv4_stats_sessions_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_ipv4_stats_sessions_up_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_ipv4_stats_sessions_down_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_ipv4_stats_sessions_admin_down_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_ipv6_stats_sessions_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_ipv6_stats_sessions_up_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_ipv6_stats_sessions_down_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_ipv6_stats_sessions_admin_down_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_local_discriminator_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_local_state_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_local_diagnostic_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_local_multiplier_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_remote_discriminator_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_remote_state_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_remote_diagnostic_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_remote_multiplier_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_negotiated_transmission_interval_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_negotiated_receive_interval_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_detection_mode_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_last_down_time_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_last_up_time_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_session_down_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_session_up_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_control_packet_input_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_control_packet_input_count_bad_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_control_packet_output_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv4_negotiated_echo_transmission_interval_get_elem(
+	struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_echo_packet_input_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv4_echo_packet_output_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_local_discriminator_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_local_state_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_local_diagnostic_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_local_multiplier_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_remote_discriminator_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_remote_state_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_remote_diagnostic_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_remote_multiplier_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_negotiated_transmission_interval_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_negotiated_receive_interval_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_detection_mode_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_last_down_time_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_last_up_time_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_session_down_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_session_up_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_control_packet_input_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_control_packet_input_count_bad_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_control_packet_output_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *bfdd_bfd_lag_mbr_ipv6_negotiated_echo_transmission_interval_get_elem(
+	struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_echo_packet_input_count_get_elem(struct nb_cb_get_elem_args *args);
+struct yang_data *
+bfdd_bfd_lag_mbr_ipv6_echo_packet_output_count_get_elem(struct nb_cb_get_elem_args *args);
 void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_defaults);
 void bfd_cli_show_lag_end(struct vty *vty, const struct lyd_node *dnode);
 

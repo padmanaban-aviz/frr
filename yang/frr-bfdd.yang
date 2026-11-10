@@ -54,8 +54,9 @@ module frr-bfdd {
 
   revision 2026-11-10 {
     description
-      "Add RFC 7130 micro-BFD on LAG (bond) members. Leaf names follow
-       the ietf-bfd-lag module of RFC 9314 where they overlap.";
+      "Add RFC 7130 micro-BFD on LAG (bond) members, IPv4 and IPv6.
+       Leaf names follow the ietf-bfd-lag module of RFC 9314 where they
+       overlap.";
     reference
       "RFC 7130: Bidirectional Forwarding Detection (BFD) on Link
                  Aggregation Group (LAG) Interfaces.
@@ -732,8 +733,9 @@ module frr-bfdd {
       container lag {
         description
           "RFC 7130 micro-BFD: one BFD session on every member link of a
-           LAG (Linux bond, 802.3ad or balance-xor). A member carries the
-           LAG's traffic only while its session is Up. Names follow the
+           LAG (Linux bond, 802.3ad or balance-xor), per address family.
+           A member carries the LAG's traffic only while all its sessions
+           are Up. Names follow the
            ietf-bfd-lag module (RFC 9314) where they overlap; timers and
            authentication come from the BFD profile.";
         reference
@@ -770,6 +772,43 @@ module frr-bfdd {
                Default: the primary IPv4 address of the LAG.";
           }
 
+          leaf use-ipv6 {
+            type boolean;
+            default "false";
+            must ". = 'false' or ../ipv6-dest-addr" {
+              error-message "use-ipv6 needs ipv6-dest-addr";
+            }
+            description
+              "Run IPv6 micro-BFD sessions on the LAG's member links.
+               With IPv4 sessions too, a member carries traffic only
+               while both are Up.";
+          }
+
+          leaf ipv6-dest-addr {
+            type inet:ipv6-address;
+            must "not(starts-with(translate(., 'FEAB', 'feab'), 'fe8')"
+               + " or starts-with(translate(., 'FEAB', 'feab'), 'fe9')"
+               + " or starts-with(translate(., 'FEAB', 'feab'), 'fea')"
+               + " or starts-with(translate(., 'FEAB', 'feab'), 'feb'))" {
+              error-message "ipv6-dest-addr can't be link-local";
+            }
+            description
+              "IPv6 address of the peer's LAG, not link-local.";
+          }
+
+          leaf ipv6-source-addr {
+            type inet:ipv6-address;
+            must "not(starts-with(translate(., 'FEAB', 'feab'), 'fe8')"
+               + " or starts-with(translate(., 'FEAB', 'feab'), 'fe9')"
+               + " or starts-with(translate(., 'FEAB', 'feab'), 'fea')"
+               + " or starts-with(translate(., 'FEAB', 'feab'), 'feb'))" {
+              error-message "ipv6-source-addr can't be link-local";
+            }
+            description
+              "IPv6 source address of the sessions (FRR extension).
+               Default: the first global IPv6 address of the LAG.";
+          }
+
           leaf admin-down {
             type boolean;
             default "false";
@@ -791,8 +830,8 @@ module frr-bfdd {
               enum strict {
                 value 0;
                 description
-                  "A member carries traffic only while its session is
-                   Up.";
+                  "A member carries traffic only while its sessions
+                   are Up.";
               }
             }
             default "strict";
@@ -824,7 +863,7 @@ module frr-bfdd {
           list member-links {
             key "member-link";
             config false;
-            description "Member links running a micro-BFD session.";
+            description "Member links running micro-BFD sessions.";
 
             leaf member-link {
               type frr-interface:interface-ref;
@@ -852,12 +891,46 @@ module frr-bfdd {
               description "IPv4 micro-BFD session on the member.";
               uses session-states;
             }
+
+            container micro-bfd-ipv6 {
+              description "IPv6 micro-BFD session on the member.";
+              uses session-states;
+            }
           }
         }
 
         container micro-bfd-ipv4-session-statistics {
           config false;
           description "IPv4 micro-BFD session counts.";
+
+          container summary {
+            description "Session counts by state.";
+
+            leaf number-of-sessions {
+              type yang:gauge32;
+              description "Sessions.";
+            }
+
+            leaf number-of-sessions-up {
+              type yang:gauge32;
+              description "Sessions Up.";
+            }
+
+            leaf number-of-sessions-down {
+              type yang:gauge32;
+              description "Sessions Down or Init.";
+            }
+
+            leaf number-of-sessions-admin-down {
+              type yang:gauge32;
+              description "Sessions AdminDown.";
+            }
+          }
+        }
+
+        container micro-bfd-ipv6-session-statistics {
+          config false;
+          description "IPv6 micro-BFD session counts.";
 
           container summary {
             description "Session counts by state.";

@@ -554,13 +554,15 @@ struct bfd_vrf_global {
 	int bg_reflector_count;
 
 	/**
-	 * RFC 7130 micro-BFD: UDP socket bound to port 6784, never read. It
-	 * only stops the kernel answering micro-BFD packets (which bfdd reads
+	 * RFC 7130 micro-BFD: UDP sockets bound to port 6784 (IPv4 and IPv6
+	 * only), never read. They only stop the kernel answering micro-BFD packets (which bfdd reads
 	 * on raw sockets) with ICMP port unreachable. Open while micro-BFD
 	 * sessions run in this VRF; they don't count in bg_session_count.
 	 */
 	int bg_mbfd;
 	unsigned int bg_mbfd_count;
+	int bg_mbfd6;
+	unsigned int bg_mbfd6_count;
 };
 
 /* Forward declaration of data plane context struct. */

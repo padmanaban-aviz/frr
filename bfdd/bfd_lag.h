@@ -41,7 +41,7 @@ struct bfd_vrf_global;
 /*
  * A re-attached member bounces its link: the bonding driver needs it down
  * to enslave it. Session Down is ignored until the member distributes with
- * its session Up again, for at most this long (milliseconds).
+ * its sessions Up again, for at most this long (milliseconds).
  */
 #define BFD_LAG_SETTLE_MAX 10000
 
@@ -61,8 +61,33 @@ enum bfd_lag_mode {
 	BFD_LAG_MODE_STRICT = 0,
 };
 
+/* Address families a LAG runs micro-BFD in, one session each per member. */
+enum bfd_lag_af {
+	BFD_LAG_AF_IPV4 = 0,
+	BFD_LAG_AF_IPV6,
+	BFD_LAG_AF_MAX,
+};
+
+union bfd_lag_addr {
+	struct in_addr v4;
+	struct in6_addr v6;
+};
+
+/* Configuration and state of one address family of a LAG. */
+struct bfd_lag_af_cfg {
+	bool use;
+	bool has_dest;
+	union bfd_lag_addr dest;
+	bool has_src;
+	union bfd_lag_addr src;
+	/* Source address in use (all zero: none). */
+	union bfd_lag_addr local;
+	/* "can't run" logged (A3). */
+	bool warned;
+};
+
 struct bfd_lag_member_stats {
-	uint64_t rx_frames;	 /* frames read from the member socket */
+	uint64_t rx_frames;	 /* frames read from the member sockets */
 	uint64_t rx_bad_frame;	 /* not a well-formed IP/UDP frame */
 	uint64_t rx_mismatch;	 /* wrong addresses or port for this LAG */
 	uint64_t rx_wrong_discr; /* Your Discriminator of another session */
@@ -75,6 +100,18 @@ struct bfd_lag_member_stats {
 
 PREDECL_DLIST(bfd_lag_members);
 struct bfd_lag;
+struct bfd_lag_member;
+
+/* The micro-BFD session of one address family on a member. */
+struct bfd_lag_msess {
+	struct bfd_lag_member *m;
+	enum bfd_lag_af af;
+	struct bfd_session *bs;
+	int port_sock; /* keeps the session's UDP source port reserved */
+	uint16_t sport;
+	struct event *t_read;
+	bool peer_admin_down;
+};
 
 struct bfd_lag_member {
 	struct bfd_lag_members_item item;
@@ -88,11 +125,7 @@ struct bfd_lag_member {
 	uint8_t ad_state;
 	bool stale; /* not reported again since zebra reconnected */
 
-	/* IPv4 micro-BFD session. */
-	struct bfd_session *bs4;
-	int port_sock; /* keeps the session's UDP source port reserved */
-	uint16_t sport;
-	struct event *t_read;
+	struct bfd_lag_msess s[BFD_LAG_AF_MAX];
 
 	/* Strict mode. */
 	bool in_grace;
@@ -104,7 +137,6 @@ struct bfd_lag_member {
 	bool req_outstanding;
 	bool req_attach;
 	struct event *t_req;
-	bool peer_admin_down;
 	const char *reason;
 	struct timeval last_action;
 
@@ -118,11 +150,7 @@ struct bfd_lag {
 
 	/* Configuration. */
 	char name[IFNAMSIZ]; /* bond interface name */
-	bool use_ipv4;
-	bool has_dest4;
-	struct in_addr dest4;
-	bool has_src4;
-	struct in_addr src4;
+	struct bfd_lag_af_cfg af[BFD_LAG_AF_MAX];
 	bool admin_down;
 	char *profile_name;
 	enum bfd_lag_mode mode;
@@ -141,9 +169,7 @@ struct bfd_lag {
 	uint8_t bond_mode; /* kernel bond mode */
 	struct event *t_stale;
 	struct event *t_addr;
-
-	/* IPv4 source address in use (INADDR_ANY: none). */
-	struct in_addr local4;
+	struct event *t_warn; /* A3 warning, if a family still can't run */
 
 	struct bfd_lag_members_head members;
 };
@@ -158,9 +184,9 @@ struct bfd_lag *bfd_lag_new(const char *name);
 struct bfd_lag *bfd_lag_find(const char *name);
 void bfd_lag_free(struct bfd_lag *lag);
 void bfd_lag_free_all(void);
-void bfd_lag_set_use_ipv4(struct bfd_lag *lag, bool use);
-void bfd_lag_set_ipv4_dest(struct bfd_lag *lag, const struct in_addr *addr);
-void bfd_lag_set_ipv4_source(struct bfd_lag *lag, const struct in_addr *addr);
+void bfd_lag_set_use(struct bfd_lag *lag, enum bfd_lag_af af, bool use);
+void bfd_lag_set_dest(struct bfd_lag *lag, enum bfd_lag_af af, const union bfd_lag_addr *addr);
+void bfd_lag_set_source(struct bfd_lag *lag, enum bfd_lag_af af, const union bfd_lag_addr *addr);
 void bfd_lag_set_admin_down(struct bfd_lag *lag, bool admin_down);
 void bfd_lag_set_profile(struct bfd_lag *lag, const char *profile);
 void bfd_lag_set_mode(struct bfd_lag *lag, enum bfd_lag_mode mode);
@@ -186,13 +212,15 @@ const char *bfd_lag_session_lag_name(const struct bfd_session *bs);
 
 /* Northbound operational state. */
 const struct bfd_lag *bfd_lag_next(const struct bfd_lag *lag);
-const struct bfd_session *bfd_lag_session_next(const struct bfd_lag *lag,
-					       const struct bfd_session *bs);
-const struct bfd_session *bfd_lag_session_find(const struct bfd_lag *lag, const char *ifname);
-bool bfd_lag_session_detached(const struct bfd_session *bs);
-bool bfd_lag_session_distributing(const struct bfd_session *bs);
-const char *bfd_lag_session_reason(const struct bfd_session *bs);
-void bfd_lag_session_counts(uint32_t *total, uint32_t *up, uint32_t *down, uint32_t *admin_down);
+const struct bfd_lag_member *bfd_lag_member_next(const struct bfd_lag *lag,
+						 const struct bfd_lag_member *m);
+const struct bfd_lag_member *bfd_lag_member_find(const struct bfd_lag *lag, const char *ifname);
+const struct bfd_session *bfd_lag_member_session(const struct bfd_lag_member *m,
+						 enum bfd_lag_af af);
+bool bfd_lag_member_detached(const struct bfd_lag_member *m);
+bool bfd_lag_member_distributing(const struct bfd_lag_member *m);
+void bfd_lag_session_counts(enum bfd_lag_af af, uint32_t *total, uint32_t *up, uint32_t *down,
+			    uint32_t *admin_down);
 
 /* Show. */
 void bfd_lag_show(struct vty *vty, const char *name, bool use_json);

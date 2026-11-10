@@ -1498,6 +1498,40 @@ DEFPY_YANG(no_bfd_lag_ipv4, no_bfd_lag_ipv4_cmd,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG(bfd_lag_ipv6, bfd_lag_ipv6_cmd,
+	"ipv6 dest-addr X:X::X:X$dest [source-addr X:X::X:X$src]",
+	"IPv6 micro-BFD sessions\n"
+	"IPv6 address of the peer's LAG (not link-local)\n"
+	"IPv6 address\n"
+	"Source address (default: the LAG's first global IPv6 address)\n"
+	"IPv6 address\n")
+{
+	nb_cli_enqueue_change(vty, "./ipv6-dest-addr", NB_OP_MODIFY, dest_str);
+	if (src_str)
+		nb_cli_enqueue_change(vty, "./ipv6-source-addr", NB_OP_MODIFY, src_str);
+	else
+		nb_cli_enqueue_change(vty, "./ipv6-source-addr", NB_OP_DESTROY, NULL);
+	nb_cli_enqueue_change(vty, "./use-ipv6", NB_OP_MODIFY, "true");
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_ipv6, no_bfd_lag_ipv6_cmd,
+	"no ipv6 [dest-addr X:X::X:X [source-addr X:X::X:X]]",
+	NO_STR
+	"IPv6 micro-BFD sessions\n"
+	"IPv6 address of the peer's LAG (not link-local)\n"
+	"IPv6 address\n"
+	"Source address\n"
+	"IPv6 address\n")
+{
+	nb_cli_enqueue_change(vty, "./use-ipv6", NB_OP_MODIFY, "false");
+	nb_cli_enqueue_change(vty, "./ipv6-dest-addr", NB_OP_DESTROY, NULL);
+	nb_cli_enqueue_change(vty, "./ipv6-source-addr", NB_OP_DESTROY, NULL);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
 DEFPY_YANG(bfd_lag_shutdown, bfd_lag_shutdown_cmd,
 	"[no] shutdown",
 	NO_STR
@@ -1555,6 +1589,14 @@ void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_d
 		if (yang_dnode_exists(dnode, "ipv4-source-addr"))
 			vty_out(vty, " source-addr %s",
 				yang_dnode_get_string(dnode, "ipv4-source-addr"));
+		vty_out(vty, "\n");
+	}
+
+	if (yang_dnode_exists(dnode, "ipv6-dest-addr")) {
+		vty_out(vty, "  ipv6 dest-addr %s", yang_dnode_get_string(dnode, "ipv6-dest-addr"));
+		if (yang_dnode_exists(dnode, "ipv6-source-addr"))
+			vty_out(vty, " source-addr %s",
+				yang_dnode_get_string(dnode, "ipv6-source-addr"));
 		vty_out(vty, "\n");
 	}
 
@@ -1716,6 +1758,8 @@ bfdd_cli_init(void)
 	install_element(BFD_NODE, &no_bfd_lag_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_ipv4_cmd);
 	install_element(BFD_LAG_NODE, &no_bfd_lag_ipv4_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_ipv6_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_ipv6_cmd);
 	install_element(BFD_LAG_NODE, &bfd_peer_profile_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_shutdown_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_enable_grace_cmd);
