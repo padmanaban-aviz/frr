@@ -55,7 +55,8 @@ module frr-bfdd {
   revision 2026-11-10 {
     description
       "Add RFC 7130 micro-BFD on LAG (bond) members, IPv4 and IPv6,
-       with failure-mode and admin-down-hold.
+       with failure-mode, admin-down-hold, and strict and
+       distributing-only modes.
        Leaf names follow the ietf-bfd-lag module of RFC 9314 where they
        overlap.";
     reference
@@ -834,9 +835,32 @@ module frr-bfdd {
                   "A member carries traffic only while its sessions
                    are Up.";
               }
+              enum distributing-only {
+                value 1;
+                description
+                  "A member's sessions start when LACP lets it
+                   distribute (bfd-on-distributing-only), and run while
+                   it stays in the bond with carrier. LACP admits members;
+                   micro-BFD takes out a member whose sessions went
+                   down, or didn't come up within max-setup-time. A
+                   member may carry traffic before its sessions are Up,
+                   which RFC 7130 doesn't allow.";
+              }
             }
             default "strict";
             description "How session state controls the members (FRR extension).";
+          }
+
+          leaf max-setup-time {
+            type uint32 {
+              range "0..60000";
+            }
+            units "milliseconds";
+            default "0";
+            description
+              "distributing-only: time a member's sessions get to come
+               Up once it distributes, before it is taken out (FRR
+               extension). 0: no limit. Not used in strict mode.";
           }
 
           leaf enable-grace {

@@ -38,6 +38,14 @@ struct bfd_vrf_global;
 #define BFD_LAG_ENABLE_GRACE_DEF    3000
 #define BFD_LAG_HOLD_UP_DEF	    0
 #define BFD_LAG_ADMIN_DOWN_HOLD_DEF 0 /* keep the member as long as AdminDown lasts */
+#define BFD_LAG_MAX_SETUP_DEF	    0 /* distributing-only: wait for the sessions forever */
+
+/*
+ * distributing-only: a member that stops distributing (LACP took it out)
+ * has its sessions stopped only if it is still not distributing this much
+ * later (milliseconds), so a short LACP blip doesn't restart them.
+ */
+#define BFD_LAG_DIST_STOP_DELAY 1000
 
 /*
  * A re-attached member bounces its link: the bonding driver needs it down
@@ -59,7 +67,13 @@ struct bfd_vrf_global;
 #define BFD_LAG_MIN_DETECT_WARN 150
 
 enum bfd_lag_mode {
+	/* Sessions on every member; a member carries traffic only while Up. */
 	BFD_LAG_MODE_STRICT = 0,
+	/*
+	 * Sessions only on members LACP lets distribute; LACP admits members,
+	 * micro-BFD only takes failed ones out.
+	 */
+	BFD_LAG_MODE_DIST_ONLY = 1,
 };
 
 /*
@@ -155,6 +169,13 @@ struct bfd_lag_member {
 	const char *reason;
 	struct timeval last_action;
 
+	/* distributing-only. */
+	bool sess_active;   /* sessions started */
+	bool ever_up;	    /* all came Up since they started */
+	bool setup_expired; /* max-setup-time over before they did */
+	struct event *t_setup;
+	struct event *t_dist_stop;
+
 	struct bfd_lag_member_stats stats;
 };
 DECLARE_DLIST(bfd_lag_members, struct bfd_lag_member, item);
@@ -171,6 +192,7 @@ struct bfd_lag {
 	enum bfd_lag_mode mode;
 	uint32_t enable_grace; /* ms */
 	uint32_t hold_up;      /* ms */
+	uint32_t max_setup;    /* ms, distributing-only, 0: off */
 	enum bfd_lag_fail_mode fail_mode;
 	uint32_t admin_down_hold; /* ms, 0: as long as AdminDown lasts */
 	bool fail_mode_warned;	  /* "open on a balance-xor bond" logged */
@@ -210,6 +232,7 @@ void bfd_lag_set_profile(struct bfd_lag *lag, const char *profile);
 void bfd_lag_set_mode(struct bfd_lag *lag, enum bfd_lag_mode mode);
 void bfd_lag_set_enable_grace(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_set_hold_up(struct bfd_lag *lag, uint32_t ms);
+void bfd_lag_set_max_setup(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_set_fail_mode(struct bfd_lag *lag, enum bfd_lag_fail_mode mode);
 void bfd_lag_set_admin_down_hold(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_apply(struct bfd_lag *lag);

@@ -1542,11 +1542,22 @@ DEFPY_YANG(bfd_lag_shutdown, bfd_lag_shutdown_cmd,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+/* The lag's mode in the candidate configuration ("strict" if unknown). */
+static const char *bfd_lag_cli_mode(struct vty *vty)
+{
+	const struct lyd_node *dnode;
+
+	dnode = yang_dnode_getf(vty->candidate_config->dnode, "%s/mode", VTY_CURR_XPATH);
+	return dnode ? yang_dnode_get_string(dnode, NULL) : "strict";
+}
+
 DEFPY_YANG(bfd_lag_enable_grace, bfd_lag_enable_grace_cmd,
 	"enable-grace (0-60000)$ms",
 	"Time a new session gets to come up before its member is taken out\n"
 	"Milliseconds\n")
 {
+	if (!strmatch(bfd_lag_cli_mode(vty), "strict"))
+		vty_out(vty, "%% Note: enable-grace is used in mode strict only\n");
 	nb_cli_enqueue_change(vty, "./enable-grace", NB_OP_MODIFY, ms_str);
 	return nb_cli_apply_changes(vty, NULL);
 }
@@ -1577,6 +1588,51 @@ DEFPY_YANG(no_bfd_lag_hold_up, no_bfd_lag_hold_up_cmd,
 	"Milliseconds\n")
 {
 	nb_cli_enqueue_change(vty, "./hold-up", NB_OP_MODIFY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(bfd_lag_mode, bfd_lag_mode_cmd,
+	"mode <strict|distributing-only>$mode",
+	"How session state controls the members\n"
+	"A member carries traffic only while its sessions are Up (default)\n"
+	"Sessions only on members LACP lets distribute; LACP admits members\n")
+{
+	if (strmatch(mode, "distributing-only"))
+		vty_out(vty,
+			"%% Note: members may carry traffic before their sessions are Up (not RFC 7130 strict)\n");
+	nb_cli_enqueue_change(vty, "./mode", NB_OP_MODIFY, mode);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_mode, no_bfd_lag_mode_cmd,
+	"no mode [<strict|distributing-only>]",
+	NO_STR
+	"How session state controls the members\n"
+	"A member carries traffic only while its sessions are Up (default)\n"
+	"Sessions only on members LACP lets distribute; LACP admits members\n")
+{
+	nb_cli_enqueue_change(vty, "./mode", NB_OP_MODIFY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(bfd_lag_max_setup_time, bfd_lag_max_setup_time_cmd,
+	"max-setup-time (0-60000)$ms",
+	"distributing-only: time the sessions get to come up before the member is taken out\n"
+	"Milliseconds (0: no limit)\n")
+{
+	if (!strmatch(bfd_lag_cli_mode(vty), "distributing-only"))
+		vty_out(vty, "%% Note: max-setup-time is used in mode distributing-only only\n");
+	nb_cli_enqueue_change(vty, "./max-setup-time", NB_OP_MODIFY, ms_str);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_max_setup_time, no_bfd_lag_max_setup_time_cmd,
+	"no max-setup-time [(0-60000)]",
+	NO_STR
+	"distributing-only: time the sessions get to come up before the member is taken out\n"
+	"Milliseconds (0: no limit)\n")
+{
+	nb_cli_enqueue_change(vty, "./max-setup-time", NB_OP_MODIFY, NULL);
 	return nb_cli_apply_changes(vty, NULL);
 }
 
@@ -1648,6 +1704,13 @@ void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_d
 
 	if (show_defaults || !yang_dnode_is_default(dnode, "hold-up"))
 		vty_out(vty, "  hold-up %u\n", yang_dnode_get_uint32(dnode, "hold-up"));
+
+	if (show_defaults || !yang_dnode_is_default(dnode, "mode"))
+		vty_out(vty, "  mode %s\n", yang_dnode_get_string(dnode, "mode"));
+
+	if (show_defaults || !yang_dnode_is_default(dnode, "max-setup-time"))
+		vty_out(vty, "  max-setup-time %u\n",
+			yang_dnode_get_uint32(dnode, "max-setup-time"));
 
 	if (show_defaults || !yang_dnode_is_default(dnode, "failure-mode"))
 		vty_out(vty, "  failure-mode %s\n", yang_dnode_get_string(dnode, "failure-mode"));
@@ -1813,6 +1876,10 @@ bfdd_cli_init(void)
 	install_element(BFD_LAG_NODE, &no_bfd_lag_enable_grace_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_hold_up_cmd);
 	install_element(BFD_LAG_NODE, &no_bfd_lag_hold_up_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_mode_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_mode_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_max_setup_time_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_max_setup_time_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_failure_mode_cmd);
 	install_element(BFD_LAG_NODE, &no_bfd_lag_failure_mode_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_admin_down_hold_cmd);

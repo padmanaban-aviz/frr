@@ -1181,6 +1181,12 @@ const struct frr_yang_module_info frr_bfdd_info = {
 			}
 		},
 		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/max-setup-time",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_max_setup_time_modify,
+			}
+		},
+		{
 			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/failure-mode",
 			.cbs = {
 				.modify = bfdd_bfd_lag_session_failure_mode_modify,
