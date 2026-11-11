@@ -882,7 +882,10 @@ Requirements and limits:
 - With fast timers, software BFD can see false failures under load.
   ``show bfd lag`` warns when the detection time is below 150 milliseconds.
 
-Strict mode, the only mode for now, works like this for every member:
+Two modes decide how session state controls the members: ``strict`` (the
+default) and ``distributing-only``.
+
+Strict mode works like this for every member:
 
 - A new session (configuration, ``bfdd`` start, a new member, ``no shutdown``)
   gets ``enable-grace`` milliseconds to come Up before its member is taken
@@ -904,6 +907,35 @@ Strict mode, the only mode for now, works like this for every member:
   ``bfdd`` took out back into the bond. When ``bfdd`` stops or fails, it
   depends on ``failure-mode``: back in (``open``, the default) or kept out
   until ``bfdd`` is back (``closed``).
+
+Distributing-only mode (like ``bfd-on-distributing-only`` on some other
+implementations) lets LACP decide which members carry traffic, and uses
+micro-BFD only to take failed ones out:
+
+- A member's sessions start when LACP lets it distribute (on a
+  ``balance-xor`` bond: when it is in the bond and up). Once started, they
+  run while the member stays in the bond with carrier.
+- The member carries traffic before its sessions are Up. RFC 7130 doesn't
+  allow that, which is why ``strict`` is the default.
+- Sessions that were Up go down: the member is taken out, and put back like
+  in strict mode (all sessions Up, ``hold-up``, then up to 10 seconds to
+  carry traffic again). Its sessions keep running while it is out.
+- Sessions that never come Up: the member is taken out after
+  ``max-setup-time`` if set; otherwise it stays in (``show bfd lag`` says it
+  is waiting for its sessions).
+- LACP takes the member out (not micro-BFD): this is not a failure, and a
+  member that doesn't distribute is never taken out by micro-BFD. Its
+  sessions keep running: when the peer's micro-BFD takes a member out, LACP
+  stops it here too, and the peer needs these sessions to put it back. They
+  stop, with AdminDown to the peer, when the member loses carrier or leaves
+  the bond (after a second).
+- ``enable-grace`` is not used in this mode, and ``max-setup-time`` is not
+  used in strict mode.
+- Changing the mode restarts the LAG: members micro-BFD took out are put
+  back, and the sessions start again under the new mode's rules.
+- Against a peer that only lets a member distribute once micro-BFD is Up
+  (IOS-XR in IETF mode, for instance), use ``strict``: both ends would wait
+  for each other.
 
 .. clicmd:: lag IFNAME
 
@@ -927,10 +959,20 @@ Strict mode, the only mode for now, works like this for every member:
    from the profile (see :clicmd:`profile BFDPROF`). Without a profile, the
    defaults apply (300 milliseconds, multiplier 3).
 
+.. clicmd:: mode <strict|distributing-only>
+
+   How session state controls the members, see above. Default ``strict``.
+
 .. clicmd:: enable-grace (0-60000)
 
-   Time, in milliseconds, a new session gets to come Up before its member is
-   taken out of the bond. Default 3000.
+   Strict mode: time, in milliseconds, a new session gets to come Up before
+   its member is taken out of the bond. Default 3000.
+
+.. clicmd:: max-setup-time (0-60000)
+
+   Distributing-only mode: time, in milliseconds, a member's sessions get to
+   come Up once it distributes, before it is taken out of the bond. Applies
+   from the next time the sessions start. ``0``: no limit. Default 0.
 
 .. clicmd:: hold-up (0-60000)
 
