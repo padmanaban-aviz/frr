@@ -10,13 +10,14 @@
 #
 #   r1 [bond0: r1-eth0, r1-eth1] ===== [bond0: r2-eth0, r2-eth1] r2
 #
-# - sessions run on the distributing members and come Up;
+# - sessions run on the members in the bond and come Up;
 # - LACP taking a member out (LACPDUs lost) is no micro-BFD failure: no
 #   detach, the sessions keep running; a member losing carrier stops them;
 # - sessions that were Up go Down: the member is taken out, its sessions
 #   keep running, and it goes back when they are Up;
 # - sessions that never come Up: the member stays in with max-setup-time
-#   0, and is taken out when max-setup-time is set and over;
+#   0, and is taken out when it has distributed for max-setup-time;
+# - the peer's bfdd restarting (all members taken out there) recovers.
 # - a mode change restarts the LAG: a member micro-BFD took out is put back.
 #
 # Skipped when the kernel has no bonding support.
@@ -34,6 +35,7 @@ sys.path.append(os.path.join(CWD, "../"))
 
 # pylint: disable=C0413
 from lib import topotest
+from lib.common_config import kill_router_daemons, start_router_daemons
 from lib.topogen import Topogen, get_topogen
 
 pytestmark = [pytest.mark.bfdd]
@@ -259,7 +261,7 @@ def test_carrier_loss_stops_sessions():
 
     d1 = _detaches(r1)
     r2.run("ip link set r2-eth1 down")
-    _expect(_check, r1, "r1-eth1", "none", False, False, "sessions stopped (not distributing)", count=30)
+    _expect(_check, r1, "r1-eth1", "none", False, False, "sessions stopped (member down)", count=30)
     assert "member r1-eth1: attached, sessions stopped" in r1.vtysh_cmd("show bfd lag bond0")
     r2.run("ip link set r2-eth1 up")
     _expect(_all_up, tgen, count=60)
@@ -327,6 +329,22 @@ def test_max_setup_time():
     _tc(r2, "r2-eth1", "off")
     _expect(_all_up, tgen, count=90)
     _conf(r1, "no max-setup-time")
+
+
+def test_peer_bfdd_restart():
+    "r2's bfdd killed: r1 takes both members out, r2 comes back, all recover."
+    tgen = get_topogen()
+    _skip(tgen)
+    r1 = tgen.gears["r1"]
+
+    kill_router_daemons(tgen, "r2", ["bfdd"])
+    # r1: sessions that were Up went down on distributing members: out.
+    for ifname in MEMBERS["r1"]:
+        _expect(_check, r1, ifname, "down", True, True, count=30)
+    # r2's members lost their LACP partner, but r2's sessions run on them
+    # when its bfdd is back: everything recovers.
+    start_router_daemons(tgen, "r2", ["bfdd"])
+    _expect(_all_up, tgen, count=120)
 
 
 def test_mode_change():

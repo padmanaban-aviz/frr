@@ -1595,7 +1595,7 @@ DEFPY_YANG(bfd_lag_mode, bfd_lag_mode_cmd,
 	"mode <strict|distributing-only>$mode",
 	"How session state controls the members\n"
 	"A member carries traffic only while its sessions are Up (default)\n"
-	"Sessions only on members LACP lets distribute; LACP admits members\n")
+	"LACP admits members; micro-BFD only takes failed distributing ones out\n")
 {
 	if (strmatch(mode, "distributing-only"))
 		vty_out(vty,
@@ -1609,7 +1609,7 @@ DEFPY_YANG(no_bfd_lag_mode, no_bfd_lag_mode_cmd,
 	NO_STR
 	"How session state controls the members\n"
 	"A member carries traffic only while its sessions are Up (default)\n"
-	"Sessions only on members LACP lets distribute; LACP admits members\n")
+	"LACP admits members; micro-BFD only takes failed distributing ones out\n")
 {
 	nb_cli_enqueue_change(vty, "./mode", NB_OP_MODIFY, NULL);
 	return nb_cli_apply_changes(vty, NULL);

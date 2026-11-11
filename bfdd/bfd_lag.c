@@ -42,18 +42,17 @@
  *   admin-down-hold, a family whose peer signals AdminDown is left out of
  *   the decision only that long; then it counts as Down.
  *
- * Distributing-only mode (Nokia's bfd-on-distributing-only): a member's
- * sessions start when LACP lets it distribute, and LACP admits members;
- * micro-BFD only takes out a member that distributes and whose sessions
- * went Down after being Up, or didn't come Up within max-setup-time (if
- * set). Once started, the sessions run while the member stays in the bond
- * with carrier, also when LACP stops it distributing: when the peer's
- * micro-BFD takes the member out, LACP stops here too, and the peer needs
- * our sessions to bring it back. They stop (AdminDown) when the member
- * loses carrier or leaves the bond, after BFD_LAG_DIST_STOP_DELAY. A member
- * micro-BFD took out, or is putting back, keeps them running too. A member
- * may carry traffic before its sessions are Up, which RFC 7130 doesn't
- * allow: strict is the default.
+ * Distributing-only mode (like bfd-on-distributing-only elsewhere): LACP
+ * admits members, and micro-BFD only takes out a member that distributes
+ * and whose sessions went Down after being Up, or didn't come Up within
+ * max-setup-time (if set) of it starting to distribute. Sessions run on
+ * every member in the bond with carrier, not only on distributing ones:
+ * when the peer's micro-BFD takes a member out, or the peer's bfdd
+ * restarts and its side takes members out, LACP stops the member here too,
+ * and the peer needs our sessions to put it back. They stop (AdminDown)
+ * when the member loses carrier or leaves the bond, after
+ * BFD_LAG_DIST_STOP_DELAY. A member may carry traffic before its sessions
+ * are Up, which RFC 7130 doesn't allow: strict is the default.
  *
  * failure-mode tells zebra what to do with detached members when bfdd goes
  * away: put them back (open, the default) or keep them out until bfdd is
@@ -91,6 +90,7 @@ static struct bfd_lags_head bfd_lags;
 static const uint8_t bfd_lag_dmac[ETH_ALEN] = { 0x01, 0x00, 0x5e, 0x90, 0x00, 0x01 };
 
 static void lag_member_evaluate(struct bfd_lag_member *m);
+static void lag_setup_cb(struct event *t);
 static void lag_sessions_sync(struct bfd_lag *lag);
 static void lag_member_sessions_delete(struct bfd_lag_member *m);
 static void lag_addr_check_cb(struct event *t);
@@ -731,22 +731,38 @@ static void lag_warn_cb(struct event *t)
 
 /*
  * Whether the member's sessions should run: always in strict.
- * distributing-only: start when the member distributes; once started, run
- * while it stays in the bond with carrier (LACP not distributing it may be
- * the peer's micro-BFD keeping it out, which needs our sessions to end), and
- * while micro-BFD has it out or is putting it back.
+ * distributing-only: while the member is in the bond with carrier, whether
+ * LACP lets it distribute or not (the peer may be keeping it out and need
+ * our sessions to end that), and while micro-BFD has it out or is putting
+ * it back.
  */
 static bool lag_member_wants_sessions(const struct bfd_lag_member *m)
 {
 	if (m->lag->mode != BFD_LAG_MODE_DIST_ONLY)
 		return true;
 
-	if (bfd_lag_member_distributing(m) || bfd_lag_member_detached(m) || m->settling ||
-	    CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_PENDING) || (m->req_outstanding && m->req_attach))
-		return true;
+	return (CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_KERNEL_ATTACHED) &&
+		CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_OPER_UP)) ||
+	       bfd_lag_member_detached(m) || m->settling ||
+	       CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_PENDING) ||
+	       (m->req_outstanding && m->req_attach);
+}
 
-	return m->sess_active && CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_KERNEL_ATTACHED) &&
-	       CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_OPER_UP);
+/*
+ * distributing-only, max-setup-time: counts while the member distributes
+ * with its sessions not yet Up since they started.
+ */
+static void lag_member_setup_timer(struct bfd_lag_member *m)
+{
+	struct bfd_lag *lag = m->lag;
+
+	if (lag->mode != BFD_LAG_MODE_DIST_ONLY || !lag->max_setup || !m->sess_active ||
+	    m->ever_up || m->setup_expired || !bfd_lag_member_distributing(m)) {
+		event_cancel(&m->t_setup);
+		return;
+	}
+	if (!event_is_scheduled(m->t_setup))
+		event_add_timer_msec(master, lag_setup_cb, m, lag->max_setup, &m->t_setup);
 }
 
 static void lag_setup_cb(struct event *t)
@@ -754,7 +770,7 @@ static void lag_setup_cb(struct event *t)
 	struct bfd_lag_member *m = EVENT_ARG(t);
 
 	m->setup_expired = true;
-	zlog_info("micro-BFD: lag %s member %s: sessions not up within max-setup-time %u ms",
+	zlog_info("micro-BFD: lag %s member %s: sessions not up within max-setup-time %u ms of distributing",
 		  m->lag->name, m->name, m->lag->max_setup);
 	lag_member_evaluate(m);
 }
@@ -810,18 +826,15 @@ static void lag_member_sessions_update(struct bfd_lag_member *m)
 	for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++)
 		if (!m->s[af].bs && lag_af_runs(lag, af))
 			lag_member_session_create(m, af);
-	if (!start)
-		return;
-
-	m->sess_active = true;
-	m->ever_up = false;
-	m->setup_expired = false;
-	event_cancel(&m->t_setup);
-	if (lag->mode == BFD_LAG_MODE_DIST_ONLY) {
-		LAG_DEBUG("lag %s member %s: distributing, sessions started", lag->name, m->name);
-		if (lag->max_setup)
-			event_add_timer_msec(master, lag_setup_cb, m, lag->max_setup, &m->t_setup);
+	if (start) {
+		m->sess_active = true;
+		m->ever_up = false;
+		m->setup_expired = false;
+		event_cancel(&m->t_setup);
+		if (lag->mode == BFD_LAG_MODE_DIST_ONLY)
+			LAG_DEBUG("lag %s member %s: sessions started", lag->name, m->name);
 	}
+	lag_member_setup_timer(m);
 }
 
 /* Create or delete the sessions of a LAG as the configuration allows. */
@@ -1559,7 +1572,7 @@ static void lag_member_evaluate(struct bfd_lag_member *m)
 	/* Not a failure: don't keep members out (fail-open). */
 	if (!any) {
 		if (lag->mode == BFD_LAG_MODE_DIST_ONLY && !m->sess_active)
-			fail_open = "sessions stopped (not distributing)";
+			fail_open = "sessions stopped (member down)";
 		else if (shut)
 			fail_open = "shutdown";
 		else if (peer_admin)

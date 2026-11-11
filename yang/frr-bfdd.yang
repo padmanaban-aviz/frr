@@ -838,9 +838,8 @@ module frr-bfdd {
               enum distributing-only {
                 value 1;
                 description
-                  "A member's sessions start when LACP lets it
-                   distribute (bfd-on-distributing-only), and run while
-                   it stays in the bond with carrier. LACP admits members;
+                  "LACP admits members (bfd-on-distributing-only);
+                   sessions run on members in the bond with carrier.
                    micro-BFD takes out a member whose sessions went
                    down, or didn't come up within max-setup-time. A
                    member may carry traffic before its sessions are Up,
