@@ -1260,6 +1260,12 @@ enum zebra_dplane_result dplane_neigh_table_update(const struct interface *ifp,
  * applies flags and address before the master in a single request.
  */
 #define DPLANE_INTF_MASTER_F_DOWN_FIRST 0x01
+/*
+ * Set the interface administratively down again once enslaved (a second
+ * request): the bonding driver opens what it enslaves, and an interface
+ * the operator set down must stay down.
+ */
+#define DPLANE_INTF_MASTER_F_DOWN_AFTER 0x02
 
 enum zebra_dplane_result dplane_intf_set_master(const struct interface *ifp,
 						const struct interface *master, uint32_t flags);

@@ -7038,13 +7038,22 @@ done:
 enum zebra_dplane_result dplane_intf_set_master(const struct interface *ifp,
 						const struct interface *master, uint32_t flags)
 {
+	enum zebra_dplane_result result;
+
 	if (ifp == NULL || master == NULL)
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 
-	return dplane_intf_master_enqueue(ifp, true, master->ifindex,
-					  CHECK_FLAG(flags, DPLANE_INTF_MASTER_F_DOWN_FIRST)
-						  ? DPLANE_INTF_ADMIN_DOWN
-						  : DPLANE_INTF_ADMIN_NONE,
+	result = dplane_intf_master_enqueue(ifp, true, master->ifindex,
+					    CHECK_FLAG(flags, DPLANE_INTF_MASTER_F_DOWN_FIRST)
+						    ? DPLANE_INTF_ADMIN_DOWN
+						    : DPLANE_INTF_ADMIN_NONE,
+					    NULL);
+	if (result == ZEBRA_DPLANE_REQUEST_FAILURE ||
+	    !CHECK_FLAG(flags, DPLANE_INTF_MASTER_F_DOWN_AFTER))
+		return result;
+
+	/* Second request: applied after the enslave (see zebra_dplane.h). */
+	return dplane_intf_master_enqueue(ifp, false, IFINDEX_INTERNAL, DPLANE_INTF_ADMIN_DOWN,
 					  NULL);
 }
 
