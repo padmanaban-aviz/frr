@@ -356,6 +356,32 @@ def test_bfdd_restart():
     _expect(_all_up, tgen, count=90)
 
 
+def _admin_up(router, ifname):
+    try:
+        link = json.loads(router.run("ip -j link show dev {}".format(ifname)))[0]
+    except (ValueError, IndexError):
+        return None
+    return "UP" in link.get("flags", [])
+
+
+def test_admin_down_respected():
+    "A member the operator sets down stays down: micro-BFD doesn't undo it."
+    tgen = get_topogen()
+    _skip(tgen)
+    r1 = tgen.gears["r1"]
+
+    r1.run("ip link set r1-eth1 down")
+    # No carrier: sessions down, micro-BFD takes it out of the bond...
+    _expect(_member_state, r1, "r1-eth1", None, True, False, count=30)
+    # ... but leaves it down.
+    topotest.sleep(5, "member stays down")
+    assert _admin_up(r1, "r1-eth1") is False, "micro-BFD set r1-eth1 up"
+    assert _master(r1, "r1-eth1") == ""
+
+    r1.run("ip link set r1-eth1 up")
+    _expect(_all_up, tgen, count=90)
+
+
 def test_unsupported_mode():
     "A bond zebra can't use for micro-BFD runs no sessions."
     tgen = get_topogen()
