@@ -845,9 +845,10 @@ Micro-BFD on LAG members (RFC 7130)
 
 Micro-BFD runs a BFD session on every member link of a link aggregation
 group (a Linux bond) that LACP lets carry traffic, as RFC 7130 describes:
-one per configured address family, IPv4 and IPv6. A member carries the bond's traffic only while its
-sessions are Up: when one fails, ``bfdd`` asks ``zebra`` to take the member
-out of the bond, and to put it back once they are all Up again. This catches failures the bond itself doesn't see, such
+one per configured address family, IPv4 and IPv6. A member carries the
+bond's traffic only while its sessions are Up: when one fails, ``bfdd`` asks
+``zebra`` to hold the member down (set it administratively down; it stays in
+the bond), and releases it once its link works again. This catches failures the bond itself doesn't see, such
 as a link that forwards in one direction only, or a peer that still answers
 LACP but no longer forwards.
 
@@ -871,41 +872,54 @@ Requirements and limits:
 - A bond that is an EVPN Ethernet Segment is refused.
 - Micro-BFD sessions always run in ``bfdd``, also with
   :option:`--dplaneaddr`.
-- Nothing else should put a member back into its bond while micro-BFD keeps
-  it out. Exclude the members from NetworkManager, systemd-networkd or
-  ifupdown; ``zebra`` releases a member put back by someone else again, with
-  a growing delay, and logs a warning.
-- A member taken out of the bond keeps its own MAC address. The bond takes the
-  MAC address of its first member unless it has one of its own, so give the
-  bond its own MAC address (``ip link set bond0 address ...``) to avoid two
-  links with the same address.
+- Nothing else should set up a member micro-BFD holds down. Exclude the
+  members from NetworkManager, systemd-networkd or ifupdown; ``zebra`` sets
+  a member set up by someone else down again, with a growing delay, and
+  logs a warning. Removing the ``lag`` configuration releases the members.
+- A member the operator set down stays down: micro-BFD only sets up again
+  what it set down itself.
 - With fast timers, software BFD can see false failures under load.
   ``show bfd lag`` warns when the detection time is below 150 milliseconds.
 
-Sessions follow RFC 7130, Section 3, in both modes:
+Sessions follow RFC 7130, Section 3:
 
-- A member's sessions run while LACP lets it distribute (on a
-  ``balance-xor`` bond: while it is in the bond and up). ``zebra`` reports
-  the LACP state from the kernel, and also reads it every second while
-  ``bfdd`` watches the bond, since the kernel doesn't always announce it.
-- A member that stops distributing (LACP took it out, it lost carrier, it
-  was set down) has its sessions deleted a second later, without AdminDown,
-  and is never taken out by micro-BFD: LACP already keeps traffic off it. A
-  member set down stays down.
+==========================================  ==================  ====================
+Member state                                ``strict``          ``distributing-only``
+==========================================  ==================  ====================
+Distributing                                sessions run        sessions run
+Standby (LACP in sync, aggregator not       sessions run        no sessions
+the active one)
+Neither (LACP took it out, no carrier,      deleted 1 s later   deleted 1 s later
+set down by the operator)
+Held down by micro-BFD                      deleted at once     deleted at once
+==========================================  ==================  ====================
+
+- ``zebra`` reports the LACP state from the kernel, and also reads it (and
+  the members' aggregators) every second while ``bfdd`` watches the bond,
+  since the kernel doesn't always announce changes. On a ``balance-xor``
+  bond a member distributes while it is in the bond and up.
+- Sessions are deleted without AdminDown: LACP stopped on the link for the
+  peer too, and it deletes its own. A member held down sends nothing.
+- Micro-BFD only holds down a member that distributes (strict: or is
+  standby): a member LACP keeps out is left alone.
 - When LACP fails in one direction only, the other end may keep
-  distributing on the link: it then loses its sessions there and takes the
-  member out, which is right, since this end doesn't collect on it.
-- A member that micro-BFD took out keeps its sessions: they decide when it
-  goes back. RFC 7130 keeps such a member distributing in LACP and only out
-  of load balancing; Linux has no such state, so ``bfdd`` takes it out of
-  the bond, which stops LACP on that link on both ends.
-- The peer then deletes its sessions for that link, so the member may hear
-  nothing from it. After ``recovery-probe-time`` without a packet from the
-  peer, the member is put back on probation: LACP comes back, the peer
-  starts its sessions, and the member stays if they come Up within a few
-  seconds of it distributing again. Otherwise it is taken out again and the
-  wait doubles, up to 8 times. While the link is still broken, each probe
-  can carry traffic for a few seconds.
+  distributing on the link: it then loses its sessions there and holds the
+  member down, which is right, since this end doesn't collect on it.
+- A failure in one direction is seen by both ends. The end that stops
+  receiving holds its member down; the other end, whose session went down
+  because the peer said so, waits one detection time before deciding, and
+  by then has lost carrier.
+
+A member held down runs no sessions, so nothing tells when its link works
+again: the recovery probe releases it on probation. After
+``recovery-probe-time`` (3 seconds by default) it is set up again; LACP gets
+up to 20 seconds to let it distribute, then its sessions start on both ends
+and get 3 seconds (strict: at least ``enable-grace``) to come Up. If they do,
+the member stays. If they don't, it is held down again and the wait doubles,
+up to ``recovery-probe-max``. The wait goes back to ``recovery-probe-time``
+once the member has stayed in with its sessions Up for 60 seconds. While the
+link is still broken, each probe can carry traffic for those few seconds;
+holding a member down and each probe are seen as a link flap by the peer.
 
 Two modes decide how session state controls the members: ``strict`` (the
 default) and ``distributing-only``.
@@ -914,39 +928,33 @@ Strict mode works like this for every member:
 
 - A new session (configuration, ``bfdd`` start, the member starting to
   distribute, ``no shutdown``) gets ``enable-grace`` milliseconds to come Up
-  before its member is taken out.
-- A session Down (any family): the member is taken out of the bond. Putting it back later
-  needs the member link down for a moment (the bonding driver requires it), so
-  the link bounces on both ends.
-- All sessions Up while the member is out: after ``hold-up`` milliseconds,
-  the member is put back. Session Down is then ignored until the member
-  carries traffic again with its sessions Up: up to 20 seconds for LACP to
-  let it distribute, then 3 seconds (or ``enable-grace``) for the sessions.
+  before its member is held down.
+- A session Down (any family): the member is held down.
 - A member that is protodown is left alone.
 - ``shutdown``, or a peer signalling AdminDown, is not a failure (RFC 5882):
-  members stay in, or are put back into, the bond. A family whose peer
-  signals AdminDown is left out of the decision, for ``admin-down-hold``
-  milliseconds if set, then it counts as down. A session that ``bfdd``
-  deletes (configuration removed, address gone) tells its peer AdminDown
-  first; one deleted because its member stopped distributing doesn't.
-- When the ``lag`` configuration is removed, ``zebra`` puts the members
-  ``bfdd`` took out back into the bond. When ``bfdd`` stops or fails, it
-  depends on ``failure-mode``: back in (``open``, the default) or kept out
-  until ``bfdd`` is back (``closed``).
+  members stay in, or are released. A family whose peer signals AdminDown is
+  left out of the decision, for ``admin-down-hold`` milliseconds if set, then
+  it counts as down. A session that ``bfdd`` deletes (configuration removed,
+  address gone) tells its peer AdminDown first; one deleted because of the
+  member's state doesn't.
+- When the ``lag`` configuration is removed, ``zebra`` releases the members
+  ``bfdd`` holds down. When ``bfdd`` stops or fails, it depends on
+  ``failure-mode``: released (``open``, the default) or kept down until
+  ``bfdd`` is back (``closed``).
 
 Distributing-only mode (like ``bfd-on-distributing-only`` on some other
 implementations) lets LACP decide which members carry traffic, and uses
-micro-BFD only to take failed ones out:
+micro-BFD only to hold failed ones down:
 
-- Sessions that were Up go down: the member is taken out, and put back like
-  in strict mode. Its sessions keep running while it is out.
-- Sessions that never come Up: the member is taken out once it has been
+- Sessions that were Up go down: the member is held down, and released by
+  the recovery probe like in strict mode.
+- Sessions that never come Up: the member is held down once it has been
   distributing for ``max-setup-time`` if set; otherwise it stays in
   (``show bfd lag`` says it is waiting for its sessions).
 - ``enable-grace`` is not used in this mode, and ``max-setup-time`` is not
   used in strict mode.
-- Changing the mode restarts the LAG: members micro-BFD took out are put
-  back, and the sessions start again under the new mode's rules.
+- Changing the mode restarts the LAG: members micro-BFD holds down are
+  released, and the sessions start again under the new mode's rules.
 - Against a peer that lets a member distribute only once micro-BFD is Up
   (IOS-XR in IETF mode, for instance), use ``strict``: in this mode both
   ends could wait for each other.
@@ -980,33 +988,34 @@ micro-BFD only to take failed ones out:
 .. clicmd:: enable-grace (0-60000)
 
    Strict mode: time, in milliseconds, a new session gets to come Up before
-   its member is taken out of the bond. Default 3000.
+   its member is held down. Default 3000.
 
 .. clicmd:: max-setup-time (0-60000)
 
    Distributing-only mode: time, in milliseconds, a member's sessions get to
-   come Up once it distributes, before it is taken out of the bond. ``0``: no limit. Default 0.
-
-.. clicmd:: hold-up (0-60000)
-
-   Time, in milliseconds, a session must stay Up before its member is put back
-   into the bond. Keep it below 10 seconds. Default 0.
+   come Up once it distributes, before it is held down. ``0``: no limit.
+   Default 0.
 
 .. clicmd:: recovery-probe-time (0-3600000)
 
-   Time, in milliseconds, a member micro-BFD took out may go without a
-   packet from the peer before it is put back on probation, see above.
-   ``0`` turns the probe off: such a member then only goes back when its
-   sessions come Up, which needs the peer to run them. Default 30000.
+   Time, in milliseconds, a member micro-BFD holds down waits before it is
+   released on probation, see above. ``0`` turns the probe off: a member held
+   down then stays down until the configuration changes (``no lag``,
+   ``shutdown``). Default 3000.
+
+.. clicmd:: recovery-probe-max (3000-3600000)
+
+   Longest wait, in milliseconds, between recovery probes of a member whose
+   link stays broken. Default 120000.
 
 .. clicmd:: failure-mode <open|closed>
 
-   What happens to the members micro-BFD took out of the bond when ``bfdd``
-   stops (also a planned stop or restart) or fails. ``open``: ``zebra`` puts
-   them back at once. ``closed``: they stay out until ``bfdd`` is back and
-   decides again; ``zebra`` keeps them out across its own restart too. Use
+   What happens to the members micro-BFD holds down when ``bfdd`` stops
+   (also a planned stop or restart) or fails. ``open``: ``zebra`` releases
+   them at once. ``closed``: they stay down until ``bfdd`` is back and
+   decides again; ``zebra`` keeps them down across its own restart too. Use
    ``closed`` with ``balance-xor`` (static) bonds: without LACP, nothing keeps
-   this end from sending on a member the peer still keeps out.
+   this end from sending on a member the peer still holds down.
    ``show bfd lag`` warns about ``open`` on a ``balance-xor`` bond. With
    ``closed``, remove the ``lag`` configuration before stopping ``bfdd`` for
    good. Default ``open``.
@@ -1015,14 +1024,15 @@ micro-BFD only to take failed ones out:
 
    Time, in milliseconds, a member is kept in the bond when the peer signals
    AdminDown in a family (for example because its micro-BFD configuration
-   was removed); then the family counts as down and the member is taken out
-   until its session is Up again. ``0`` keeps the member as long as AdminDown
+   was removed); then the family counts as down and the member is held down. ``0`` keeps the member as long as AdminDown
    lasts. Use the same value on both ends (``timers nbr-unconfig`` on some
    other implementations). Default 0.
 
 ``shutdown``
-   Disable the sessions (AdminDown). Members are not kept out of the bond
-   while the sessions are disabled.
+   Disable the sessions (AdminDown). Members are not held down while the
+   sessions are disabled. The sessions keep sending AdminDown every second,
+   also new ones (a member that starts distributing), so the peer never
+   takes a shut down LAG for a failure.
 
 The configuration follows the ``ietf-bfd-lag`` YANG module (RFC 9314) where
 the two overlap: ``lag-name``, ``use-ipv4``, ``ipv4-dest-addr``,
@@ -1052,7 +1062,8 @@ one):
 .. clicmd:: show bfd lag [IFNAME] [json]
 
    Show the bond status as ``zebra`` reports it, and for every member its
-   sessions, whether it is in or out of the bond and why, and packet counters.
+   sessions, whether it is held down and why, recovery probes, and packet
+   counters.
    The sessions also appear in ``show bfd peers``, with
    ``bfd-mode micro-bfd`` and ``bfd-name lag:IFNAME``.
 
@@ -1062,8 +1073,8 @@ one):
 
 .. clicmd:: debug bfd lag
 
-   Show micro-BFD decisions: sessions created and deleted, members taken out
-   and put back, and the bond and member state ``zebra`` reports.
+   Show micro-BFD decisions: sessions created and deleted, members held down
+   and released, and the bond and member state ``zebra`` reports.
 
 
 .. _bfd-distributed:

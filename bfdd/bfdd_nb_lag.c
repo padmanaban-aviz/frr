@@ -235,18 +235,6 @@ int bfdd_bfd_lag_session_enable_grace_modify(struct nb_cb_modify_args *args)
 }
 
 /*
- * XPath: /frr-bfdd:bfdd/bfd/lag/session/hold-up
- */
-int bfdd_bfd_lag_session_hold_up_modify(struct nb_cb_modify_args *args)
-{
-	if (args->event != NB_EV_APPLY)
-		return NB_OK;
-
-	bfd_lag_set_hold_up(lag_entry(args->dnode), yang_dnode_get_uint32(args->dnode, NULL));
-	return NB_OK;
-}
-
-/*
  * XPath: /frr-bfdd:bfdd/bfd/lag/session/max-setup-time
  */
 int bfdd_bfd_lag_session_max_setup_time_modify(struct nb_cb_modify_args *args)
@@ -268,6 +256,19 @@ int bfdd_bfd_lag_session_recovery_probe_time_modify(struct nb_cb_modify_args *ar
 
 	bfd_lag_set_recovery_probe(lag_entry(args->dnode),
 				   yang_dnode_get_uint32(args->dnode, NULL));
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-bfdd:bfdd/bfd/lag/session/recovery-probe-max
+ */
+int bfdd_bfd_lag_session_recovery_probe_max_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	bfd_lag_set_recovery_probe_max(lag_entry(args->dnode),
+				       yang_dnode_get_uint32(args->dnode, NULL));
 	return NB_OK;
 }
 

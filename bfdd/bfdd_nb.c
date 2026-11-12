@@ -1175,12 +1175,6 @@ const struct frr_yang_module_info frr_bfdd_info = {
 			}
 		},
 		{
-			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/hold-up",
-			.cbs = {
-				.modify = bfdd_bfd_lag_session_hold_up_modify,
-			}
-		},
-		{
 			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/max-setup-time",
 			.cbs = {
 				.modify = bfdd_bfd_lag_session_max_setup_time_modify,
@@ -1190,6 +1184,12 @@ const struct frr_yang_module_info frr_bfdd_info = {
 			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/recovery-probe-time",
 			.cbs = {
 				.modify = bfdd_bfd_lag_session_recovery_probe_time_modify,
+			}
+		},
+		{
+			.xpath = "/frr-bfdd:bfdd/bfd/lag/session/recovery-probe-max",
+			.cbs = {
+				.modify = bfdd_bfd_lag_session_recovery_probe_max_modify,
 			}
 		},
 		{
