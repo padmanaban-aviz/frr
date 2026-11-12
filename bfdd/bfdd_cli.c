@@ -1636,6 +1636,25 @@ DEFPY_YANG(no_bfd_lag_max_setup_time, no_bfd_lag_max_setup_time_cmd,
 	return nb_cli_apply_changes(vty, NULL);
 }
 
+DEFPY_YANG(bfd_lag_recovery_probe_time, bfd_lag_recovery_probe_time_cmd,
+	"recovery-probe-time (0-3600000)$ms",
+	"Put a member back on probation when the peer is silent this long\n"
+	"Milliseconds (0: off)\n")
+{
+	nb_cli_enqueue_change(vty, "./recovery-probe-time", NB_OP_MODIFY, ms_str);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_lag_recovery_probe_time, no_bfd_lag_recovery_probe_time_cmd,
+	"no recovery-probe-time [(0-3600000)]",
+	NO_STR
+	"Put a member back on probation when the peer is silent this long\n"
+	"Milliseconds (0: off)\n")
+{
+	nb_cli_enqueue_change(vty, "./recovery-probe-time", NB_OP_MODIFY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
 DEFPY_YANG(bfd_lag_failure_mode, bfd_lag_failure_mode_cmd,
 	"failure-mode <open|closed>$mode",
 	"What happens to members micro-BFD took out when bfdd goes away\n"
@@ -1711,6 +1730,10 @@ void bfd_cli_show_lag(struct vty *vty, const struct lyd_node *dnode, bool show_d
 	if (show_defaults || !yang_dnode_is_default(dnode, "max-setup-time"))
 		vty_out(vty, "  max-setup-time %u\n",
 			yang_dnode_get_uint32(dnode, "max-setup-time"));
+
+	if (show_defaults || !yang_dnode_is_default(dnode, "recovery-probe-time"))
+		vty_out(vty, "  recovery-probe-time %u\n",
+			yang_dnode_get_uint32(dnode, "recovery-probe-time"));
 
 	if (show_defaults || !yang_dnode_is_default(dnode, "failure-mode"))
 		vty_out(vty, "  failure-mode %s\n", yang_dnode_get_string(dnode, "failure-mode"));
@@ -1880,6 +1903,8 @@ bfdd_cli_init(void)
 	install_element(BFD_LAG_NODE, &no_bfd_lag_mode_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_max_setup_time_cmd);
 	install_element(BFD_LAG_NODE, &no_bfd_lag_max_setup_time_cmd);
+	install_element(BFD_LAG_NODE, &bfd_lag_recovery_probe_time_cmd);
+	install_element(BFD_LAG_NODE, &no_bfd_lag_recovery_probe_time_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_failure_mode_cmd);
 	install_element(BFD_LAG_NODE, &no_bfd_lag_failure_mode_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_admin_down_hold_cmd);

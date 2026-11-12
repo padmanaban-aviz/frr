@@ -2,8 +2,8 @@
 /*
  * RFC 7130 micro-BFD: BFD on LAG (bond) member links.
  *
- * A micro-BFD session runs on every member of a configured bond, one per
- * configured address family (IPv4, IPv6). The member carries the bond's
+ * A micro-BFD session runs on every distributing member of a configured
+ * bond, one per configured address family (IPv4, IPv6). The member carries the bond's
  * traffic only while its sessions are Up ("strict" mode): when one fails,
  * bfdd asks zebra to take the member out of the bond (detach,
  * ZEBRA_LAG_MBFD_DIST_SET); when they are all Up again, to put it back
@@ -26,33 +26,42 @@
  * sessions are Up. A family that can't run (no source address, ...) is left
  * out of that decision, and so is a family whose peer signals AdminDown.
  *
+ * Session lifecycle (RFC 7130, Section 3), both modes: a member's sessions
+ * run while LACP lets it distribute (on a balance-xor bond: while it is in
+ * the bond and up), and are deleted once it doesn't (after
+ * BFD_LAG_DIST_STOP_DELAY). Micro-BFD only ever takes out a member that
+ * distributes. A member micro-BFD took out, or is putting back, keeps its
+ * sessions: the RFC keeps such a member distributing in LACP and only out
+ * of load balancing; Linux can only take it out of the bond, which stops
+ * LACP on the link, and the sessions are what tells when it can go back.
+ * The peer deletes its sessions when LACP stops (no AdminDown: that isn't
+ * an administrative action, and AdminDown would put the member back), so
+ * a member we keep out that hears nothing from the peer for
+ * recovery-probe-time is put back on probation; it stays if its sessions
+ * come Up soon after it distributes again, else it goes out again and the
+ * wait doubles.
+ *
  * Strict mode, per member:
  * - enable-grace: after its sessions are created (configuration, bfdd
- *   start, a new member), the member is left alone for this long so the
- *   sessions can come Up first.
- * - A session Down: detach at once, unless in enable-grace, settling after
- *   an attach, or the member is protodown.
- * - All sessions Up while detached: wait hold-up, then attach.
- * - Attach bounces the member link (the bonding driver needs it down to
- *   enslave it), so the sessions go Down again on both ends. Down is
- *   ignored until the member distributes with its sessions Up, for at most
- *   BFD_LAG_SETTLE_MAX.
+ *   start, the member starting to distribute), the member is left alone
+ *   for this long so the sessions can come Up first.
+ * - A session Down: take the member out at once, unless in enable-grace,
+ *   settling after an attach, or the member is protodown.
+ * - All sessions Up while out: wait hold-up, then put it back.
+ * - Putting back bounces the member link (the bonding driver needs it down
+ *   to enslave it) and LACP negotiates again. Down is ignored until the
+ *   member distributes with its sessions Up again (BFD_LAG_SETTLE_MAX to
+ *   distribute, then BFD_LAG_SETTLE_UP for the sessions).
  * - Shutdown, or a peer signalling AdminDown in every family (RFC 5882,
- *   Section 3.2): not a failure, members are attached (fail-open). With
+ *   Section 3.2): not a failure, members are put back (fail-open). With
  *   admin-down-hold, a family whose peer signals AdminDown is left out of
  *   the decision only that long; then it counts as Down.
  *
  * Distributing-only mode (like bfd-on-distributing-only elsewhere): LACP
- * admits members, and micro-BFD only takes out a member that distributes
- * and whose sessions went Down after being Up, or didn't come Up within
- * max-setup-time (if set) of it starting to distribute. Sessions run on
- * every member in the bond with carrier, not only on distributing ones:
- * when the peer's micro-BFD takes a member out, or the peer's bfdd
- * restarts and its side takes members out, LACP stops the member here too,
- * and the peer needs our sessions to put it back. They stop (AdminDown)
- * when the member loses carrier or leaves the bond, after
- * BFD_LAG_DIST_STOP_DELAY. A member may carry traffic before its sessions
- * are Up, which RFC 7130 doesn't allow: strict is the default.
+ * admits members; micro-BFD only takes out a member whose sessions went
+ * Down after being Up, or didn't come Up within max-setup-time (if set) of
+ * it starting to distribute. A member may carry traffic before its
+ * sessions are Up, which RFC 7130 doesn't allow: strict is the default.
  *
  * failure-mode tells zebra what to do with detached members when bfdd goes
  * away: put them back (open, the default) or keep them out until bfdd is
@@ -91,6 +100,7 @@ static const uint8_t bfd_lag_dmac[ETH_ALEN] = { 0x01, 0x00, 0x5e, 0x90, 0x00, 0x
 
 static void lag_member_evaluate(struct bfd_lag_member *m);
 static void lag_setup_cb(struct event *t);
+static void lag_probe_cb(struct event *t);
 static void lag_sessions_sync(struct bfd_lag *lag);
 static void lag_member_sessions_delete(struct bfd_lag_member *m);
 static void lag_addr_check_cb(struct event *t);
@@ -469,6 +479,8 @@ static struct bfd_lag_member *lag_member_new(struct bfd_lag *lag, const struct z
 
 	m->lag = lag;
 	m->ifindex = zm->mbr_ifindex;
+	m->probe_backoff = 1;
+	monotime(&m->last_heard);
 	for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++) {
 		m->s[af].m = m;
 		m->s[af].af = af;
@@ -489,6 +501,7 @@ static void lag_member_free(struct bfd_lag_member *m)
 	event_cancel(&m->t_req);
 	event_cancel(&m->t_setup);
 	event_cancel(&m->t_dist_stop);
+	event_cancel(&m->t_probe);
 
 	bfd_lag_members_del(&m->lag->members, m);
 	XFREE(MTYPE_BFDD_LAG_MEMBER, m);
@@ -640,7 +653,8 @@ static void lag_member_session_create(struct bfd_lag_member *m, enum bfd_lag_af 
 	LAG_DEBUG("lag %s member %s: session created (%s)", lag->name, m->name, bs_to_string(bs));
 }
 
-static void lag_member_session_delete(struct bfd_lag_member *m, enum bfd_lag_af af)
+static void lag_member_session_delete_(struct bfd_lag_member *m, enum bfd_lag_af af,
+				       bool admin_down)
 {
 	struct bfd_session *bs = m->s[af].bs;
 
@@ -650,11 +664,11 @@ static void lag_member_session_delete(struct bfd_lag_member *m, enum bfd_lag_af 
 	LAG_DEBUG("lag %s member %s: %s session deleted", m->lag->name, m->name, af_name(af));
 
 	/*
-	 * RFC 5880, Section 6.8.16: tell the peer the session goes away
-	 * (AdminDown) rather than let it time out, so the peer doesn't take
-	 * the member out for it. Twice, in case one is lost.
+	 * RFC 5880, Section 6.8.16: when the configuration removes a session,
+	 * tell the peer (AdminDown) rather than let it time out, so the peer
+	 * doesn't take the member out for it. Twice, in case one is lost.
 	 */
-	if (bs->sock != -1 && bs->ses_state != PTM_BFD_ADM_DOWN) {
+	if (admin_down && bs->sock != -1 && bs->ses_state != PTM_BFD_ADM_DOWN) {
 		bs->ses_state = PTM_BFD_ADM_DOWN;
 		bs->local_diag = BD_ADMIN_DOWN;
 		ptm_bfd_snd(bs, 0);
@@ -673,6 +687,11 @@ static void lag_member_session_delete(struct bfd_lag_member *m, enum bfd_lag_af 
 		event_cancel(&m->t_grace);
 		event_cancel(&m->t_holdup);
 	}
+}
+
+static void lag_member_session_delete(struct bfd_lag_member *m, enum bfd_lag_af af)
+{
+	lag_member_session_delete_(m, af, true);
 }
 
 static void lag_member_sessions_delete(struct bfd_lag_member *m)
@@ -730,21 +749,14 @@ static void lag_warn_cb(struct event *t)
 }
 
 /*
- * Whether the member's sessions should run: always in strict.
- * distributing-only: while the member is in the bond with carrier, whether
- * LACP lets it distribute or not (the peer may be keeping it out and need
- * our sessions to end that), and while micro-BFD has it out or is putting
- * it back.
+ * RFC 7130, Section 3: whether the member's sessions should run. While it
+ * distributes; and while micro-BFD has it out or is putting it back (its
+ * stand-in for "distributing in LACP, out of load balancing").
  */
 static bool lag_member_wants_sessions(const struct bfd_lag_member *m)
 {
-	if (m->lag->mode != BFD_LAG_MODE_DIST_ONLY)
-		return true;
-
-	return (CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_KERNEL_ATTACHED) &&
-		CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_OPER_UP)) ||
-	       bfd_lag_member_detached(m) || m->settling ||
-	       CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_PENDING) ||
+	return bfd_lag_member_distributing(m) || bfd_lag_member_detached(m) || m->settling ||
+	       m->probing || CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_PENDING) ||
 	       (m->req_outstanding && m->req_attach);
 }
 
@@ -784,7 +796,11 @@ static void lag_member_sessions_reset(struct bfd_lag_member *m)
 	event_cancel(&m->t_dist_stop);
 }
 
-/* distributing-only: down or out of the bond after the delay: stop. */
+/*
+ * Still not distributing after the delay: delete the sessions (RFC 7130,
+ * Section 3). Without AdminDown: LACP stopped on the link for the peer too,
+ * and AdminDown would make a peer that keeps the member out put it back.
+ */
 static void lag_dist_stop_cb(struct event *t)
 {
 	struct bfd_lag_member *m = EVENT_ARG(t);
@@ -792,10 +808,10 @@ static void lag_dist_stop_cb(struct event *t)
 	if (lag_member_wants_sessions(m))
 		return;
 
-	LAG_DEBUG("lag %s member %s: down or out of the bond, stopping its sessions", m->lag->name,
+	LAG_DEBUG("lag %s member %s: not distributing, deleting its sessions", m->lag->name,
 		  m->name);
-	/* AdminDown to the peer on the way out (lag_member_session_delete()). */
-	lag_member_sessions_delete(m);
+	for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++)
+		lag_member_session_delete_(m, af, false);
 	lag_member_sessions_reset(m);
 	lag_member_evaluate(m);
 }
@@ -831,8 +847,7 @@ static void lag_member_sessions_update(struct bfd_lag_member *m)
 		m->ever_up = false;
 		m->setup_expired = false;
 		event_cancel(&m->t_setup);
-		if (lag->mode == BFD_LAG_MODE_DIST_ONLY)
-			LAG_DEBUG("lag %s member %s: sessions started", lag->name, m->name);
+		LAG_DEBUG("lag %s member %s: sessions started", lag->name, m->name);
 	}
 	lag_member_setup_timer(m);
 }
@@ -1422,6 +1437,8 @@ static void lag_recv_cb(struct event *t)
 		rx.local.sa_sin.sin_port = htons(fi.dport);
 	}
 
+	/* Heard from the peer: the recovery probe waits. */
+	monotime(&m->last_heard);
 	bfd_ctrl_pkt_process(bs, &pkt.cp, fi.plen, &rx);
 }
 #endif /* BFD_LINUX */
@@ -1444,6 +1461,14 @@ static void lag_settle_cb(struct event *t)
 
 	m->settling = false;
 	LAG_DEBUG("lag %s member %s: attach-settle ceiling reached", m->lag->name, m->name);
+	/*
+	 * Put back on probation but not distributing: the peer still keeps
+	 * its end out. It stays in the bond without sessions (RFC 7130,
+	 * Section 3) until the peer's own probe brings LACP back.
+	 */
+	if (m->probing && !bfd_lag_member_distributing(m))
+		m->probing = false;
+	lag_member_sessions_update(m);
 	lag_member_evaluate(m);
 }
 
@@ -1453,6 +1478,58 @@ static void lag_holdup_cb(struct event *t)
 
 	m->holdup_done = true;
 	lag_member_evaluate(m);
+}
+
+/*
+ * Recovery probe: a member we keep out that hears nothing from the peer
+ * (it deleted its sessions when LACP stopped on the link) goes back on
+ * probation once recovery-probe-time (times the back-off) has passed.
+ */
+static uint32_t lag_probe_interval(const struct bfd_lag_member *m)
+{
+	return m->lag->recovery_probe * MAX(m->probe_backoff, 1U);
+}
+
+static void lag_member_probe_arm(struct bfd_lag_member *m)
+{
+	int64_t left;
+
+	if (!m->lag->recovery_probe || !bfd_lag_member_detached(m) || m->req_outstanding ||
+	    event_is_scheduled(m->t_probe))
+		return;
+
+	left = (int64_t)lag_probe_interval(m) - monotime_since(&m->last_heard, NULL) / 1000;
+	event_add_timer_msec(master, lag_probe_cb, m, MAX(left, 0), &m->t_probe);
+}
+
+static uint32_t lag_member_probe_left(const struct bfd_lag_member *m)
+{
+	return m->t_probe ? event_timer_remain_msec(m->t_probe) : 0;
+}
+
+static void lag_member_request(struct bfd_lag_member *m, bool attach, const char *why);
+
+static void lag_probe_cb(struct event *t)
+{
+	struct bfd_lag_member *m = EVENT_ARG(t);
+	int64_t heard = monotime_since(&m->last_heard, NULL) / 1000;
+
+	if (!bfd_lag_member_detached(m) || m->req_outstanding ||
+	    CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_PENDING))
+		return;
+
+	/* The peer was heard meanwhile: its sessions decide. */
+	if (heard < lag_probe_interval(m)) {
+		lag_member_probe_arm(m);
+		return;
+	}
+
+	zlog_info("micro-BFD: lag %s member %s: nothing from the peer for %" PRId64
+		  " ms, putting it back on probation",
+		  m->lag->name, m->name, heard);
+	m->probing = true;
+	m->stats.probe_count++;
+	lag_member_request(m, true, "recovery probe");
 }
 
 static void lag_member_request(struct bfd_lag_member *m, bool attach, const char *why)
@@ -1478,13 +1555,23 @@ static void lag_member_request(struct bfd_lag_member *m, bool attach, const char
 		m->stats.attach_count++;
 		/* The link bounces: ignore Down until it's back. */
 		m->settling = true;
+		m->settle_dist = false;
 		event_cancel(&m->t_settle);
 		event_add_timer_msec(master, lag_settle_cb, m, BFD_LAG_SETTLE_MAX, &m->t_settle);
 	} else {
 		m->stats.detach_count++;
 		m->settling = false;
 		event_cancel(&m->t_settle);
+		if (m->probing) {
+			/* The probe failed: wait longer next time. */
+			m->probe_backoff = MIN(MAX(m->probe_backoff, 1U) * 2,
+					       (uint32_t)BFD_LAG_PROBE_BACKOFF_MAX);
+			m->probing = false;
+		}
+		/* Out from now: the probe counts from here or the last packet. */
+		monotime(&m->last_heard);
 	}
+	event_cancel(&m->t_probe);
 	m->holdup_done = false;
 	event_cancel(&m->t_holdup);
 }
@@ -1571,8 +1658,8 @@ static void lag_member_evaluate(struct bfd_lag_member *m)
 
 	/* Not a failure: don't keep members out (fail-open). */
 	if (!any) {
-		if (lag->mode == BFD_LAG_MODE_DIST_ONLY && !m->sess_active)
-			fail_open = "sessions stopped (member down)";
+		if (!m->sess_active)
+			fail_open = "not distributing (no sessions)";
 		else if (shut)
 			fail_open = "shutdown";
 		else if (peer_admin)
@@ -1597,6 +1684,7 @@ static void lag_member_evaluate(struct bfd_lag_member *m)
 		m->ever_up = true;
 		m->setup_expired = false;
 		event_cancel(&m->t_setup);
+		event_cancel(&m->t_probe);
 		if (detached) {
 			if (lag->hold_up && !m->holdup_done) {
 				m->reason = "hold-up";
@@ -1618,6 +1706,11 @@ static void lag_member_evaluate(struct bfd_lag_member *m)
 			event_cancel(&m->t_settle);
 			LAG_DEBUG("lag %s member %s: settled", lag->name, m->name);
 		}
+		if (m->probing)
+			zlog_info("micro-BFD: lag %s member %s: recovery probe succeeded",
+				  lag->name, m->name);
+		m->probing = false;
+		m->probe_backoff = 1;
 		m->reason = NULL;
 		return;
 	}
@@ -1632,24 +1725,38 @@ static void lag_member_evaluate(struct bfd_lag_member *m)
 			m->reason = "max-setup-time expired";
 		else
 			m->reason = lag_down_reason(m, deciding);
+		lag_member_probe_arm(m);
 		return;
+	}
+	/*
+	 * Settling, distributing again: the sessions get BFD_LAG_SETTLE_UP
+	 * from now (the peer only starts its own now).
+	 */
+	if (m->settling && !m->settle_dist && bfd_lag_member_distributing(m)) {
+		m->settle_dist = true;
+		event_cancel(&m->t_settle);
+		event_add_timer_msec(master, lag_settle_cb, m,
+				     MAX(BFD_LAG_SETTLE_UP,
+					 lag->mode == BFD_LAG_MODE_STRICT ? lag->enable_grace : 0),
+				     &m->t_settle);
 	}
 	if (lag->mode == BFD_LAG_MODE_STRICT && m->in_grace) {
 		m->reason = "enable-grace";
 		return;
 	}
 	/*
-	 * distributing-only: a session that never came Up only takes the
-	 * member out when max-setup-time is over.
+	 * LACP taking a member out is not a micro-BFD failure; only a member
+	 * that carries traffic is taken out (its sessions go when the delay
+	 * is over).
 	 */
-	/*
-	 * distributing-only: LACP taking a member out is not a micro-BFD
-	 * failure; only a member that carries traffic is taken out.
-	 */
-	if (lag->mode == BFD_LAG_MODE_DIST_ONLY && !m->settling && !bfd_lag_member_distributing(m)) {
+	if (!m->settling && !bfd_lag_member_distributing(m)) {
 		m->reason = "not distributing";
 		return;
 	}
+	/*
+	 * distributing-only: a session that never came Up only takes the
+	 * member out when max-setup-time is over.
+	 */
 	if (lag->mode == BFD_LAG_MODE_DIST_ONLY && !m->ever_up && !m->setup_expired) {
 		m->reason = lag->max_setup ? "waiting for session"
 					   : "waiting for session (max-setup-time off)";
@@ -1965,6 +2072,7 @@ struct bfd_lag *bfd_lag_new(const char *name)
 	lag->enable_grace = BFD_LAG_ENABLE_GRACE_DEF;
 	lag->hold_up = BFD_LAG_HOLD_UP_DEF;
 	lag->max_setup = BFD_LAG_MAX_SETUP_DEF;
+	lag->recovery_probe = BFD_LAG_RECOVERY_PROBE_DEF;
 	lag->fail_mode = BFD_LAG_FAIL_OPEN;
 	lag->admin_down_hold = BFD_LAG_ADMIN_DOWN_HOLD_DEF;
 	lag->ifindex = IFINDEX_INTERNAL;
@@ -2116,6 +2224,17 @@ void bfd_lag_set_mode(struct bfd_lag *lag, enum bfd_lag_mode mode)
 void bfd_lag_set_max_setup(struct bfd_lag *lag, uint32_t ms)
 {
 	lag->max_setup = ms;
+}
+
+void bfd_lag_set_recovery_probe(struct bfd_lag *lag, uint32_t ms)
+{
+	struct bfd_lag_member *m;
+
+	lag->recovery_probe = ms;
+	frr_each (bfd_lag_members, &lag->members, m) {
+		event_cancel(&m->t_probe);
+		lag_member_probe_arm(m);
+	}
 }
 
 void bfd_lag_set_enable_grace(struct bfd_lag *lag, uint32_t ms)
@@ -2335,6 +2454,9 @@ static void lag_member_show(struct vty *vty, struct bfd_lag_member *m, json_obje
 		json_object_boolean_add(jm, "settling", m->settling);
 		json_object_boolean_add(jm, "sessionActive", m->sess_active);
 		json_object_boolean_add(jm, "maxSetupExpired", m->setup_expired);
+		json_object_boolean_add(jm, "probing", m->probing);
+		json_object_int_add(jm, "probeCount", m->stats.probe_count);
+		json_object_int_add(jm, "nextProbeIn", lag_member_probe_left(m));
 		json_object_boolean_add(jm, "peerAdminDown",
 					m->s[BFD_LAG_AF_IPV4].peer_admin_down ||
 						m->s[BFD_LAG_AF_IPV6].peer_admin_down);
@@ -2357,9 +2479,7 @@ static void lag_member_show(struct vty *vty, struct bfd_lag_member *m, json_obje
 	}
 
 	vty_out(vty, "    member %s: %s%s%s\n", m->name, detached ? "detached" : "attached",
-		distributing ? ", distributing" : "",
-		m->lag->mode == BFD_LAG_MODE_DIST_ONLY && !m->sess_active ? ", sessions stopped"
-									  : "");
+		distributing ? ", distributing" : "", !m->sess_active ? ", no sessions" : "");
 	for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++) {
 		const struct bfd_lag_msess *ms = &m->s[af];
 		const struct bfd_session *bs = ms->bs;
@@ -2385,8 +2505,13 @@ static void lag_member_show(struct vty *vty, struct bfd_lag_member *m, json_obje
 	if (m->reason)
 		vty_out(vty, "      reason: %s\n", m->reason);
 	vty_out(vty, "      zebra: %s\n", zapi_lag_mbr_flags2str(m->zflags, buf, sizeof(buf)));
-	vty_out(vty, "      detached %" PRIu64 " times, attached %" PRIu64 " times\n",
-		m->stats.detach_count, m->stats.attach_count);
+	vty_out(vty,
+		"      detached %" PRIu64 " times, attached %" PRIu64
+		" times, recovery probes %" PRIu64 "%s\n",
+		m->stats.detach_count, m->stats.attach_count, m->stats.probe_count,
+		m->probing ? " (probing now)" : "");
+	if (m->t_probe)
+		vty_out(vty, "      recovery probe in %u ms\n", lag_member_probe_left(m));
 	vty_out(vty,
 		"      frames: rx %" PRIu64 " (bad %" PRIu64 ", not this LAG %" PRIu64
 		", wrong discriminator %" PRIu64 ", no session %" PRIu64 "), tx %" PRIu64
@@ -2455,6 +2580,7 @@ static void lag_show_one(struct vty *vty, struct bfd_lag *lag, json_object *json
 		json_object_int_add(jl, "enableGrace", lag->enable_grace);
 		json_object_int_add(jl, "holdUp", lag->hold_up);
 		json_object_int_add(jl, "maxSetupTime", lag->max_setup);
+		json_object_int_add(jl, "recoveryProbeTime", lag->recovery_probe);
 		json_object_string_add(jl, "failureMode", bfd_lag_fail_mode2str(lag->fail_mode));
 		json_object_int_add(jl, "adminDownHold", lag->admin_down_hold);
 		json_object_string_add(jl, "noSessionReason", no_session ? no_session : "");
@@ -2501,6 +2627,8 @@ static void lag_show_one(struct vty *vty, struct bfd_lag *lag, json_object *json
 	if (lag->mode == BFD_LAG_MODE_DIST_ONLY)
 		vty_out(vty,
 			"  note: distributing-only lets a member carry traffic before its sessions are Up (not RFC 7130 strict)\n");
+	vty_out(vty, "  recovery-probe-time %u ms%s\n", lag->recovery_probe,
+		lag->recovery_probe ? "" : " (off)");
 	vty_out(vty, "  failure-mode %s, admin-down-hold %u ms%s\n",
 		bfd_lag_fail_mode2str(lag->fail_mode), lag->admin_down_hold,
 		lag->admin_down_hold ? "" : " (as long as AdminDown lasts)");

@@ -41,18 +41,32 @@ struct bfd_vrf_global;
 #define BFD_LAG_MAX_SETUP_DEF	    0 /* distributing-only: wait for the sessions forever */
 
 /*
- * distributing-only: a member that stops distributing (LACP took it out)
- * has its sessions stopped only if it is still not distributing this much
- * later (milliseconds), so a short LACP blip doesn't restart them.
+ * RFC 7130, Section 3: a member's sessions run while it distributes. One
+ * that stops distributing (LACP took it out) has them deleted only if it
+ * still isn't distributing this much later (milliseconds), so a short LACP
+ * blip doesn't restart them.
  */
 #define BFD_LAG_DIST_STOP_DELAY 1000
 
 /*
  * A re-attached member bounces its link: the bonding driver needs it down
- * to enslave it. Session Down is ignored until the member distributes with
- * its sessions Up again, for at most this long (milliseconds).
+ * to enslave it, and LACP negotiates again. Session Down is ignored until
+ * the member distributes with its sessions Up again: it gets
+ * BFD_LAG_SETTLE_MAX to distribute, then BFD_LAG_SETTLE_UP for the
+ * sessions (the peer starts its own only once it distributes too).
+ * Milliseconds.
  */
-#define BFD_LAG_SETTLE_MAX 10000
+#define BFD_LAG_SETTLE_MAX 20000
+#define BFD_LAG_SETTLE_UP  3000
+
+/*
+ * Recovery probe: a member micro-BFD took out that hears nothing from the
+ * peer for recovery-probe-time is put back on probation (the peer deletes
+ * its sessions when LACP stops on the link, RFC 7130 Section 3). Each probe
+ * that fails doubles the wait, up to this many times recovery-probe-time.
+ */
+#define BFD_LAG_RECOVERY_PROBE_DEF 30000
+#define BFD_LAG_PROBE_BACKOFF_MAX  8
 
 /* A detach/attach request zebra hasn't answered is retried after this (ms). */
 #define BFD_LAG_REQ_TIMEOUT 5000
@@ -121,6 +135,7 @@ struct bfd_lag_member_stats {
 	uint64_t tx_errors;
 	uint64_t detach_count;
 	uint64_t attach_count;
+	uint64_t probe_count;
 };
 
 PREDECL_DLIST(bfd_lag_members);
@@ -168,6 +183,11 @@ struct bfd_lag_member {
 	struct event *t_req;
 	const char *reason;
 	struct timeval last_action;
+	bool settle_dist;	   /* settling: distributing again */
+	bool probing;		   /* put back by the recovery probe */
+	uint32_t probe_backoff;	   /* times recovery-probe-time */
+	struct timeval last_heard; /* out: last packet from the peer */
+	struct event *t_probe;
 
 	/* distributing-only. */
 	bool sess_active;   /* sessions started */
@@ -193,6 +213,7 @@ struct bfd_lag {
 	uint32_t enable_grace; /* ms */
 	uint32_t hold_up;      /* ms */
 	uint32_t max_setup;    /* ms, distributing-only, 0: off */
+	uint32_t recovery_probe; /* ms, 0: off */
 	enum bfd_lag_fail_mode fail_mode;
 	uint32_t admin_down_hold; /* ms, 0: as long as AdminDown lasts */
 	bool fail_mode_warned;	  /* "open on a balance-xor bond" logged */
@@ -233,6 +254,7 @@ void bfd_lag_set_mode(struct bfd_lag *lag, enum bfd_lag_mode mode);
 void bfd_lag_set_enable_grace(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_set_hold_up(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_set_max_setup(struct bfd_lag *lag, uint32_t ms);
+void bfd_lag_set_recovery_probe(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_set_fail_mode(struct bfd_lag *lag, enum bfd_lag_fail_mode mode);
 void bfd_lag_set_admin_down_hold(struct bfd_lag *lag, uint32_t ms);
 void bfd_lag_apply(struct bfd_lag *lag);

@@ -838,8 +838,7 @@ module frr-bfdd {
               enum distributing-only {
                 value 1;
                 description
-                  "LACP admits members (bfd-on-distributing-only);
-                   sessions run on members in the bond with carrier.
+                  "LACP admits members (bfd-on-distributing-only).
                    micro-BFD takes out a member whose sessions went
                    down, or didn't come up within max-setup-time. A
                    member may carry traffic before its sessions are Up,
@@ -882,6 +881,21 @@ module frr-bfdd {
             description
               "Time a session must stay Up before its member is put back
                into the LAG (FRR extension).";
+          }
+
+          leaf recovery-probe-time {
+            type uint32 {
+              range "0..3600000";
+            }
+            units "milliseconds";
+            default "30000";
+            description
+              "A member micro-BFD took out that hears nothing from the
+               peer for this long is put back on probation: the peer
+               deletes its sessions when LACP stops on the link (RFC 7130,
+               Section 3). It stays if its sessions come Up soon after it
+               distributes again; otherwise it goes out again and the wait
+               doubles, up to 8 times. 0: off (FRR extension).";
           }
 
           leaf failure-mode {

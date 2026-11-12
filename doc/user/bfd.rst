@@ -844,8 +844,8 @@ Micro-BFD on LAG members (RFC 7130)
 ===================================
 
 Micro-BFD runs a BFD session on every member link of a link aggregation
-group (a Linux bond), as RFC 7130 describes: one per configured address
-family, IPv4 and IPv6. A member carries the bond's traffic only while its
+group (a Linux bond) that LACP lets carry traffic, as RFC 7130 describes:
+one per configured address family, IPv4 and IPv6. A member carries the bond's traffic only while its
 sessions are Up: when one fails, ``bfdd`` asks ``zebra`` to take the member
 out of the bond, and to put it back once they are all Up again. This catches failures the bond itself doesn't see, such
 as a link that forwards in one direction only, or a peer that still answers
@@ -882,27 +882,53 @@ Requirements and limits:
 - With fast timers, software BFD can see false failures under load.
   ``show bfd lag`` warns when the detection time is below 150 milliseconds.
 
+Sessions follow RFC 7130, Section 3, in both modes:
+
+- A member's sessions run while LACP lets it distribute (on a
+  ``balance-xor`` bond: while it is in the bond and up). ``zebra`` reports
+  the LACP state from the kernel, and also reads it every second while
+  ``bfdd`` watches the bond, since the kernel doesn't always announce it.
+- A member that stops distributing (LACP took it out, it lost carrier, it
+  was set down) has its sessions deleted a second later, without AdminDown,
+  and is never taken out by micro-BFD: LACP already keeps traffic off it. A
+  member set down stays down.
+- When LACP fails in one direction only, the other end may keep
+  distributing on the link: it then loses its sessions there and takes the
+  member out, which is right, since this end doesn't collect on it.
+- A member that micro-BFD took out keeps its sessions: they decide when it
+  goes back. RFC 7130 keeps such a member distributing in LACP and only out
+  of load balancing; Linux has no such state, so ``bfdd`` takes it out of
+  the bond, which stops LACP on that link on both ends.
+- The peer then deletes its sessions for that link, so the member may hear
+  nothing from it. After ``recovery-probe-time`` without a packet from the
+  peer, the member is put back on probation: LACP comes back, the peer
+  starts its sessions, and the member stays if they come Up within a few
+  seconds of it distributing again. Otherwise it is taken out again and the
+  wait doubles, up to 8 times. While the link is still broken, each probe
+  can carry traffic for a few seconds.
+
 Two modes decide how session state controls the members: ``strict`` (the
 default) and ``distributing-only``.
 
 Strict mode works like this for every member:
 
-- A new session (configuration, ``bfdd`` start, a new member, ``no shutdown``)
-  gets ``enable-grace`` milliseconds to come Up before its member is taken
-  out.
+- A new session (configuration, ``bfdd`` start, the member starting to
+  distribute, ``no shutdown``) gets ``enable-grace`` milliseconds to come Up
+  before its member is taken out.
 - A session Down (any family): the member is taken out of the bond. Putting it back later
   needs the member link down for a moment (the bonding driver requires it), so
   the link bounces on both ends.
 - All sessions Up while the member is out: after ``hold-up`` milliseconds,
   the member is put back. Session Down is then ignored until the member
-  carries traffic again with its sessions Up, for at most 10 seconds.
+  carries traffic again with its sessions Up: up to 20 seconds for LACP to
+  let it distribute, then 3 seconds (or ``enable-grace``) for the sessions.
 - A member that is protodown is left alone.
 - ``shutdown``, or a peer signalling AdminDown, is not a failure (RFC 5882):
   members stay in, or are put back into, the bond. A family whose peer
   signals AdminDown is left out of the decision, for ``admin-down-hold``
   milliseconds if set, then it counts as down. A session that ``bfdd``
   deletes (configuration removed, address gone) tells its peer AdminDown
-  first.
+  first; one deleted because its member stopped distributing doesn't.
 - When the ``lag`` configuration is removed, ``zebra`` puts the members
   ``bfdd`` took out back into the bond. When ``bfdd`` stops or fails, it
   depends on ``failure-mode``: back in (``open``, the default) or kept out
@@ -912,27 +938,18 @@ Distributing-only mode (like ``bfd-on-distributing-only`` on some other
 implementations) lets LACP decide which members carry traffic, and uses
 micro-BFD only to take failed ones out:
 
-- Sessions run on every member that is in the bond and has carrier, whether
-  LACP lets it distribute or not.
 - Sessions that were Up go down: the member is taken out, and put back like
-  in strict mode (all sessions Up, ``hold-up``, then up to 10 seconds to
-  carry traffic again). Its sessions keep running while it is out.
+  in strict mode. Its sessions keep running while it is out.
 - Sessions that never come Up: the member is taken out once it has been
   distributing for ``max-setup-time`` if set; otherwise it stays in
   (``show bfd lag`` says it is waiting for its sessions).
-- Only a member that distributes is taken out. LACP taking a member out is
-  not a failure. The sessions keep running on it: when the peer's micro-BFD
-  takes a member out (or its ``bfdd`` restarts), LACP stops the member here
-  too, and the peer needs these sessions to put it back. They stop, with
-  AdminDown to the peer, when the member loses carrier or leaves the bond
-  (after a second).
 - ``enable-grace`` is not used in this mode, and ``max-setup-time`` is not
   used in strict mode.
 - Changing the mode restarts the LAG: members micro-BFD took out are put
   back, and the sessions start again under the new mode's rules.
-- A peer that lets a member distribute only once micro-BFD is Up (IOS-XR in
-  IETF mode, for instance) works too, since the sessions don't wait for
-  LACP; ``strict`` on both ends is still the RFC 7130 setup.
+- Against a peer that lets a member distribute only once micro-BFD is Up
+  (IOS-XR in IETF mode, for instance), use ``strict``: in this mode both
+  ends could wait for each other.
 
 .. clicmd:: lag IFNAME
 
@@ -974,6 +991,13 @@ micro-BFD only to take failed ones out:
 
    Time, in milliseconds, a session must stay Up before its member is put back
    into the bond. Keep it below 10 seconds. Default 0.
+
+.. clicmd:: recovery-probe-time (0-3600000)
+
+   Time, in milliseconds, a member micro-BFD took out may go without a
+   packet from the peer before it is put back on probation, see above.
+   ``0`` turns the probe off: such a member then only goes back when its
+   sessions come Up, which needs the peer to run them. Default 30000.
 
 .. clicmd:: failure-mode <open|closed>
 

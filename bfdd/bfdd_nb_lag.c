@@ -259,6 +259,19 @@ int bfdd_bfd_lag_session_max_setup_time_modify(struct nb_cb_modify_args *args)
 }
 
 /*
+ * XPath: /frr-bfdd:bfdd/bfd/lag/session/recovery-probe-time
+ */
+int bfdd_bfd_lag_session_recovery_probe_time_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	bfd_lag_set_recovery_probe(lag_entry(args->dnode),
+				   yang_dnode_get_uint32(args->dnode, NULL));
+	return NB_OK;
+}
+
+/*
  * XPath: /frr-bfdd:bfdd/bfd/lag/session/failure-mode
  */
 int bfdd_bfd_lag_session_failure_mode_modify(struct nb_cb_modify_args *args)
