@@ -13,11 +13,12 @@
 # r1 runs failure-mode closed, r2 the default (open).
 #
 # - failure-mode reaches zebra, and a change at runtime too;
-# - failure-mode closed: bfdd killed with a member out, the member stays
-#   out; after bfdd is back, it goes back in only when its session is Up;
+# - failure-mode closed: bfdd killed with a member held down, it stays
+#   down; after bfdd is back, its recovery probes release it only for good
+#   once its session is Up;
 # - admin-down-hold: the peer's AdminDown keeps members in for that long,
-#   then they go out ("peer AdminDown, hold expired"); a new value applies
-#   to a hold already running; 0 keeps members in again;
+#   then they are held down ("peer AdminDown, hold expired"); a new value
+#   applies to a hold already running; 0 keeps members in again;
 # - failure-mode open on a balance-xor bond is warned about.
 #
 # Skipped when the kernel has no bonding support.
@@ -141,6 +142,15 @@ def _master(router, ifname):
     return link.get("master", "")
 
 
+def _link_up(router, ifname):
+    "Administratively up (micro-BFD holds a failed member down)."
+    try:
+        link = json.loads(router.run("ip -j link show dev {}".format(ifname)))[0]
+    except (ValueError, IndexError):
+        return None
+    return "UP" in link.get("flags", [])
+
+
 def _member(router, ifname):
     return _lag(router).get("members", {}).get(ifname, {})
 
@@ -162,9 +172,9 @@ def _member_state(router, ifname, state=None, detached=None, distributing=None):
         )
     if detached is not None:
         kernel = _master(router, ifname)
-        if detached and kernel != "":
-            return "{}: {} still in {} in the kernel".format(
-                router.name, ifname, kernel
+        if detached and (kernel != "bond0" or _link_up(router, ifname)):
+            return "{}: {} not held down in bond0 (master {!r}, up {})".format(
+                router.name, ifname, kernel, _link_up(router, ifname)
             )
         if detached is False and kernel != "bond0":
             return "{}: {} not in bond0 in the kernel ({!r})".format(
@@ -253,21 +263,28 @@ def test_failure_mode_closed():
     r1 = tgen.gears["r1"]
     r2 = tgen.gears["r2"]
 
+    # No recovery probe while bfdd is killed (a probe could release it).
+    _conf(r1, "recovery-probe-time 60000")
     _drop_mbfd(r2, "r2-eth1", True)
     _expect(_member_state, r1, "r1-eth1", None, True, False)
 
     kill_router_daemons(tgen, "r1", ["bfdd"])
-    # failure-mode closed: zebra keeps it out.
+    # failure-mode closed: zebra keeps it down.
     topotest.sleep(5, "bfdd gone, failure-mode closed")
-    assert _master(r1, "r1-eth1") == "", "r1-eth1 put back without bfdd"
-    assert _master(r1, "r1-eth0") == "bond0"
+    assert _link_up(r1, "r1-eth1") is False, "r1-eth1 released without bfdd"
+    assert _master(r1, "r1-eth1") == "bond0"
+    assert _link_up(r1, "r1-eth0")
 
     start_router_daemons(tgen, "r1", ["bfdd"])
-    # Back: the failure is still there, the member stays out.
+    _conf(r1, "no recovery-probe-time")
+    # Back: the failure is still there; probes release it, it fails again.
     _expect(_member_state, r1, "r1-eth0", "up", False)
     _expect(_member_state, r1, "r1-eth1", None, True, False)
-    topotest.sleep(5, "past enable-grace")
-    assert _master(r1, "r1-eth1") == "", "r1-eth1 put back while its session is down"
+    _expect(
+        lambda: None if _member(r1, "r1-eth1").get("probeCount", 0) >= 1 else "no probe",
+        count=60,
+    )
+    _expect(_member_state, r1, "r1-eth1", None, True, False, count=60)
 
     _drop_mbfd(r2, "r2-eth1", False)
     _expect(_all_up, tgen, count=90)
@@ -297,16 +314,24 @@ def test_admin_down_hold():
 
     _expect(_held, count=15, wait=0.5)
 
-    # The hold ends: out, with the reason.
-    for ifname in MEMBERS["r2"]:
-        _expect(_member_state, r2, ifname, "down", True, count=60)
+    # The hold ends: held down, with the reason.
+    def _held_expired(ifname):
+        err = _member_state(r2, ifname, None, True)
+        if err:
+            return err
         m = _member(r2, ifname)
-        assert m["reason"] == "peer AdminDown, hold expired", m
-        assert m["microBfdIpv4"]["adminDownHoldExpired"], m
+        if not m.get("detached"):
+            return "{} released meanwhile".format(ifname)
+        if m["reason"] not in ("peer AdminDown, hold expired", "recovery probe failed"):
+            return "{}: reason {!r}".format(ifname, m["reason"])
+        return None
+
+    for ifname in MEMBERS["r2"]:
+        _expect(_held_expired, ifname, count=60)
 
     # 0: as long as AdminDown lasts; members go back in. r1 deleted its
-    # sessions once LACP stopped there (RFC 7130, Section 3), and sends
-    # AdminDown again when the member distributes again.
+    # sessions once the members lost carrier (RFC 7130, Section 3); r2's
+    # recovery probe releases them and r1 sends AdminDown again.
     _conf(r2, "admin-down-hold 0")
 
     def _back_admin_down(ifname):
@@ -326,10 +351,9 @@ def test_admin_down_hold():
     topotest.sleep(2, "AdminDown older than 2 s")
     _conf(r2, "admin-down-hold 2000")
     for ifname in MEMBERS["r2"]:
-        _expect(_member_state, r2, ifname, "down", True, count=20)
+        _expect(_member_state, r2, ifname, None, True, count=20)
 
-    # r1 runs no sessions on members that don't distribute; r2's recovery
-    # probe puts its members back.
+    # r2's recovery probe releases its members.
     _conf(r1, "no shutdown")
     _expect(_all_up, tgen, count=150)
     _conf(r2, "no admin-down-hold")

@@ -12,11 +12,13 @@
 # - one session per member comes Up, members stay in the bond;
 # - sessions are Asynchronous only (Required Min Echo RX 0) and marked as
 #   micro-BFD in "show bfd peers";
-# - micro-BFD packets lost on one member: that member is taken out of the
-#   bond (strict mode), the other keeps carrying traffic;
-# - packets flow again: the member is put back and distributes again;
-# - shutdown is not a failure: no member is taken out, on either end;
-# - bfdd stopping puts members back (zebra fail-open); after a restart
+# - micro-BFD packets lost on one member: that member is held down (set
+#   administratively down, still in the bond) and runs no sessions, the
+#   other keeps carrying traffic;
+# - packets flow again: the recovery probe releases it, it distributes and
+#   its sessions come Up;
+# - shutdown is not a failure: no member is held down, on either end;
+# - bfdd stopping releases members (zebra fail-open); after a restart
 #   enable-grace delays the decision, then strict mode applies again;
 # - a bond in an unsupported mode runs no sessions.
 #
@@ -141,6 +143,15 @@ def _master(router, ifname):
     return link.get("master", "")
 
 
+def _link_up(router, ifname):
+    "Administratively up (micro-BFD holds a failed member down)."
+    try:
+        link = json.loads(router.run("ip -j link show dev {}".format(ifname)))[0]
+    except (ValueError, IndexError):
+        return None
+    return "UP" in link.get("flags", [])
+
+
 def _member(router, ifname):
     return _lag(router).get("members", {}).get(ifname, {})
 
@@ -162,9 +173,9 @@ def _member_state(router, ifname, state=None, detached=None, distributing=None):
         )
     if detached is not None:
         kernel = _master(router, ifname)
-        if detached and kernel != "":
-            return "{}: {} still in {} in the kernel".format(
-                router.name, ifname, kernel
+        if detached and (kernel != "bond0" or _link_up(router, ifname)):
+            return "{}: {} not held down in bond0 (master {!r}, up {})".format(
+                router.name, ifname, kernel, _link_up(router, ifname)
             )
         if detached is False and kernel != "bond0":
             return "{}: {} not in bond0 in the kernel ({!r})".format(
@@ -260,8 +271,22 @@ def test_member_failure_detaches():
 
     _drop_mbfd(r2, "r2-eth1", True)
 
-    _expect(_member_state, r1, "r1-eth1", None, True, False)
-    assert _member(r1, "r1-eth1")["reason"] == "session down"
+    def _held():
+        # One snapshot: recovery probes release it now and then.
+        err = _member_state(r1, "r1-eth1", None, True, False)
+        if err:
+            return err
+        m = _member(r1, "r1-eth1")
+        if not m.get("detached"):
+            return "r1-eth1 released meanwhile"
+        if m["reason"] not in ("session down", "recovery probe failed"):
+            return "reason {!r}".format(m["reason"])
+        # RFC 7130, Section 3: held down, no sessions.
+        if m.get("sessionActive") or "microBfdIpv4" in m:
+            return "sessions on a member held down: {}".format(m)
+        return None
+
+    _expect(_held)
     assert _member(r1, "r1-eth1")["detachCount"] >= 1
 
     # The other member keeps the bond up.
@@ -272,14 +297,15 @@ def test_member_failure_detaches():
 
 
 def test_member_recovery_attaches():
-    "Packets flow again: the member goes back into the bond and distributes."
+    "Packets flow again: a recovery probe releases the member, it distributes."
     tgen = get_topogen()
     _skip(tgen)
 
     _drop_mbfd(tgen.gears["r2"], "r2-eth1", False)
 
     _expect(_all_up, tgen, count=90)
-    assert _member(tgen.gears["r1"], "r1-eth1")["attachCount"] >= 1
+    m = _member(tgen.gears["r1"], "r1-eth1")
+    assert m["attachCount"] >= 1 and m["probeCount"] >= 1, m
 
 
 def test_all_members_down():
@@ -295,12 +321,10 @@ def test_all_members_down():
         _expect(_member_state, r1, ifname, None, True, False)
 
     # The bond has no carrier now, and zebra withdraws its addresses from
-    # the daemons; the sessions keep the LAG's address.
+    # the daemons; the LAG keeps its address for the recovery probes.
     lag = _lag(r1)
     assert lag["ipv4SourceAddrInUse"] == "10.0.40.1", lag
     assert lag["noSessionReason"] == "", lag
-    for ifname in MEMBERS["r1"]:
-        assert _member(r1, ifname)["microBfdIpv4"]["localState"] != "admin-down"
 
     for ifname in MEMBERS["r2"]:
         _drop_mbfd(r2, ifname, False)
@@ -341,17 +365,24 @@ def test_bfdd_restart():
     _expect(_member_state, r1, "r1-eth1", None, True, False)
 
     kill_router_daemons(tgen, "r1", ["bfdd"])
-    # Zebra re-attaches what bfdd took out (fail-open).
+    # Zebra releases what bfdd held down (fail-open).
     _expect(
-        lambda: None if _master(r1, "r1-eth1") == "bond0" else "r1-eth1 not back",
+        lambda: None if _link_up(r1, "r1-eth1") else "r1-eth1 still down",
         count=20,
     )
+    assert _master(r1, "r1-eth1") == "bond0"
 
     start_router_daemons(tgen, "r1", ["bfdd"])
-    # The failure is still there. r2 keeps its end out, so r1-eth1 doesn't
-    # distribute and runs no sessions; r2's recovery probe puts its end
-    # back, the sessions start and fail: out again.
-    _expect(_member_state, r1, "r1-eth1", None, True, False, count=150)
+    # The failure is still there. r2 lost r1's sessions while bfdd was gone
+    # and holds its members down; its probes release them. r1-eth1's
+    # sessions don't come Up, so one end or the other holds it down again
+    # (whichever end's timer runs out first).
+    def _held_either_end():
+        if _member(r1, "r1-eth1").get("detached") or _member(r2, "r2-eth1").get("detached"):
+            return None
+        return "r1-eth1: {}".format(_member(r1, "r1-eth1").get("reason"))
+
+    _expect(_held_either_end, count=150)
     _expect(_member_state, r1, "r1-eth0", "up", False)
 
     _drop_mbfd(r2, "r2-eth1", False)

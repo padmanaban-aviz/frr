@@ -12,9 +12,9 @@
 #
 # - an IPv4 and an IPv6 session per member come Up, members stay in the
 #   bond; the IPv6 sessions use the bond's global address;
-# - IPv6 micro-BFD packets lost on one member: the member is taken out even
-#   though its IPv4 session stays Up (a member carries traffic only while
-#   all its sessions are Up), and put back when they flow again;
+# - IPv6 micro-BFD packets lost on one member: the member is held down even
+#   though its IPv4 session was Up (a member carries traffic only while
+#   all its sessions are Up), and released when they flow again;
 # - the same with IPv4 packets lost;
 # - IPv6 configured on a bond without a global IPv6 address: the IPv6
 #   sessions don't run and members are judged on IPv4 alone; they start
@@ -147,6 +147,15 @@ def _master(router, ifname):
     return link.get("master", "")
 
 
+def _link_up(router, ifname):
+    "Administratively up (micro-BFD holds a failed member down)."
+    try:
+        link = json.loads(router.run("ip -j link show dev {}".format(ifname)))[0]
+    except (ValueError, IndexError):
+        return None
+    return "UP" in link.get("flags", [])
+
+
 def _member(router, ifname):
     return _lag(router).get("members", {}).get(ifname, {})
 
@@ -174,9 +183,9 @@ def _member_state(router, ifname, states=None, detached=None, distributing=None)
         )
     if detached is not None:
         kernel = _master(router, ifname)
-        if detached and kernel != "":
-            return "{}: {} still in {} in the kernel".format(
-                router.name, ifname, kernel
+        if detached and (kernel != "bond0" or _link_up(router, ifname)):
+            return "{}: {} not held down in bond0 (master {!r}, up {})".format(
+                router.name, ifname, kernel, _link_up(router, ifname)
             )
         if detached is False and kernel != "bond0":
             return "{}: {} not in bond0 in the kernel ({!r})".format(
@@ -281,11 +290,21 @@ def _family_failure(tgen, family, fam_key, other_key):
 
     _drop_mbfd(r2, "r2-eth1", family, True)
 
-    _expect(_member_state, r1, "r1-eth1", {fam_key: "down"}, True, False)
-    m = _member(r1, "r1-eth1")
-    assert m["reason"] == "IPv{} session down".format(family), m
-    # The other family's session on that member runs on, Up.
-    _expect(_member_state, r1, "r1-eth1", {other_key: "up"})
+    def _held():
+        err = _member_state(r1, "r1-eth1", None, True, False)
+        if err:
+            return err
+        m = _member(r1, "r1-eth1")
+        if not m.get("detached"):
+            return "r1-eth1 released meanwhile"
+        if m["reason"] not in ("IPv{} session down".format(family), "recovery probe failed"):
+            return "reason {!r}".format(m["reason"])
+        # Held down: no session of either family (RFC 7130, Section 3).
+        if fam_key in m or other_key in m:
+            return "sessions on a member held down: {}".format(m)
+        return None
+
+    _expect(_held)
     # The other member keeps the bond up.
     _expect(_member_state, r1, "r1-eth0", BOTH_UP, False, True)
     if r1.run("command -v ping").strip():

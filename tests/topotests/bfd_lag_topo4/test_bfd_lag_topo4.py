@@ -14,14 +14,16 @@
 # - LACP taking a member out (LACPDUs lost) is no micro-BFD failure: no
 #   detach, its sessions are deleted (RFC 7130, Section 3) and start again
 #   when it distributes; the same on carrier loss. When LACP fails on one
-#   side only, the end still distributing loses its sessions and takes the
-#   member out; its recovery probe puts it back once LACP works again;
-# - sessions that were Up go Down: the member is taken out, its sessions
-#   keep running, and it goes back when they are Up;
+#   side only, the end still distributing loses its sessions and holds the
+#   member down; its recovery probe releases it once LACP works again;
+# - sessions that were Up go Down: the member is held down (set down, still
+#   in the bond) and runs no sessions; recovery probes release it, and it
+#   stays once they come Up;
 # - sessions that never come Up: the member stays in with max-setup-time
-#   0, and is taken out when it has distributed for max-setup-time;
-# - the peer's bfdd restarting (all members taken out there) recovers.
-# - a mode change restarts the LAG: a member micro-BFD took out is put back.
+#   0, and is held down when it has distributed for max-setup-time;
+# - the peer's bfdd restarting (all members held down here) recovers.
+# - a mode change restarts the LAG: a member micro-BFD holds down is
+#   released.
 #
 # Skipped when the kernel has no bonding support.
 #
@@ -144,6 +146,15 @@ def _master(router, ifname):
     return link.get("master", "")
 
 
+def _link_up(router, ifname):
+    "Administratively up (micro-BFD holds a failed member down)."
+    try:
+        link = json.loads(router.run("ip -j link show dev {}".format(ifname)))[0]
+    except (ValueError, IndexError):
+        return None
+    return "UP" in link.get("flags", [])
+
+
 def _member(router, ifname):
     return _lag(router).get("members", {}).get(ifname, {})
 
@@ -171,8 +182,10 @@ def _check(router, ifname, state=None, detached=None, active=None, reason=None):
                 router.name, ifname, m.get("detached"), m.get("reason")
             )
         kernel = _master(router, ifname)
-        if detached and kernel != "":
-            return "{}: {} still in {}".format(router.name, ifname, kernel)
+        if detached and (kernel != "bond0" or _link_up(router, ifname)):
+            return "{}: {} not held down in bond0 (master {!r}, up {})".format(
+                router.name, ifname, kernel, _link_up(router, ifname)
+            )
         if not detached and kernel != "bond0":
             return "{}: {} not in bond0 ({!r})".format(router.name, ifname, kernel)
     return None
@@ -273,7 +286,7 @@ def test_carrier_loss_stops_sessions():
     d1 = _detaches(r1)
     r2.run("ip link set r2-eth1 down")
     _expect(_check, r1, "r1-eth1", "none", False, False, "not distributing (no sessions)", count=30)
-    assert "member r1-eth1: attached, no sessions" in r1.vtysh_cmd("show bfd lag bond0")
+    assert "member r1-eth1: in, no sessions" in r1.vtysh_cmd("show bfd lag bond0")
     r2.run("ip link set r2-eth1 up")
     _expect(_all_up, tgen, count=60)
     assert _detaches(r1) == d1
@@ -321,18 +334,26 @@ def _restart_r1_eth1(tgen, mbfd_drop):
     r2.run("ip link set r2-eth1 up")
 
 
+def _held(router, ifname, reasons):
+    err = _check(router, ifname, "none", True, False)
+    if err:
+        return err
+    reason = _member(router, ifname).get("reason")
+    if reason not in reasons:
+        return "{}: {} reason {!r}".format(router.name, ifname, reason)
+    return None
+
+
 def test_failure_detaches():
-    "Sessions that were Up go Down: out, sessions keep running, back after."
+    "Sessions that were Up go Down: held down, no sessions, back after."
     tgen = get_topogen()
     _skip(tgen)
     r1 = tgen.gears["r1"]
     r2 = tgen.gears["r2"]
 
     _tc(r2, "r2-eth1", "mbfd")
-    _expect(_check, r1, "r1-eth1", "down", True, True, "session down", count=30)
-    # Out of the bond, the sessions still run (they decide when it goes back).
-    topotest.sleep(3, "detached member keeps its sessions")
-    assert _check(r1, "r1-eth1", None, True, True) is None
+    _expect(_held, r1, "r1-eth1", ("session down", "recovery probe failed"), count=30)
+    assert _master(r1, "r1-eth1") == "bond0"
 
     _tc(r2, "r2-eth1", "off")
     _expect(_all_up, tgen, count=90)
@@ -361,9 +382,8 @@ def test_max_setup_time():
     _conf(r1, "max-setup-time 3000")
     _restart_r1_eth1(tgen, True)
     _expect(
-        _check, r1, "r1-eth1", "down", True, True, "max-setup-time expired", count=60,
+        _held, r1, "r1-eth1", ("max-setup-time expired", "recovery probe failed"), count=60
     )
-    assert _member(r1, "r1-eth1")["maxSetupExpired"]
 
     _tc(r2, "r2-eth1", "off")
     _expect(_all_up, tgen, count=90)
@@ -377,12 +397,11 @@ def test_peer_bfdd_restart():
     r1 = tgen.gears["r1"]
 
     kill_router_daemons(tgen, "r2", ["bfdd"])
-    # r1: sessions that were Up went down on distributing members: out.
+    # r1: sessions that were Up went down on distributing members: held down.
     for ifname in MEMBERS["r1"]:
-        _expect(_check, r1, ifname, "down", True, True, count=30)
-    # r2's members lost their LACP partner and run no sessions when its
-    # bfdd is back; r1 hears nothing on the members it keeps out, and its
-    # recovery probe puts them back: everything recovers.
+        _expect(_check, r1, ifname, "none", True, False, count=30)
+    # r1's recovery probes release them; once r2's bfdd is back, sessions
+    # start on both ends as LACP distributes: everything recovers.
     start_router_daemons(tgen, "r2", ["bfdd"])
     _expect(_all_up, tgen, count=180)
     assert sum(_member(r1, i).get("probeCount", 0) for i in MEMBERS["r1"]) >= 1
@@ -396,7 +415,7 @@ def test_mode_change():
     r2 = tgen.gears["r2"]
 
     _tc(r2, "r2-eth1", "mbfd")
-    _expect(_check, r1, "r1-eth1", "down", True, True, count=30)
+    _expect(_check, r1, "r1-eth1", "none", True, False, count=30)
     attached = _member(r1, "r1-eth1")["attachCount"]
 
     _conf(r1, "mode strict")
@@ -409,9 +428,7 @@ def test_mode_change():
 
     _expect(_put_back, count=30)
     assert _lag(r1)["mode"] == "strict"
-    # What follows depends on r2, which took r2-eth1 out too: r1-eth1 only
-    # distributes (and runs sessions) once r2's recovery probe puts r2-eth1
-    # back. Packets flowing again, everything recovers.
+    # Packets flowing again, everything recovers.
     _tc(r2, "r2-eth1", "off")
     _expect(_all_up, tgen, count=150)
     out = _conf(r1, "max-setup-time 1000")
