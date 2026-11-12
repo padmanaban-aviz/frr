@@ -7057,6 +7057,15 @@ enum zebra_dplane_result dplane_intf_set_master(const struct interface *ifp,
 					  NULL);
 }
 
+enum zebra_dplane_result dplane_intf_set_admin(const struct interface *ifp, bool up)
+{
+	if (ifp == NULL)
+		return ZEBRA_DPLANE_REQUEST_FAILURE;
+
+	return dplane_intf_master_enqueue(ifp, false, IFINDEX_INTERNAL,
+					  up ? DPLANE_INTF_ADMIN_UP : DPLANE_INTF_ADMIN_DOWN, NULL);
+}
+
 enum zebra_dplane_result dplane_intf_release_master(const struct interface *ifp, bool admin_up,
 						    const uint8_t *mac)
 {

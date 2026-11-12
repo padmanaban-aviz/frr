@@ -22,12 +22,13 @@ struct interface;
 struct vty;
 
 /* struct zebra_mbfd_mbr flags */
-#define ZEBRA_MBFD_F_DETACHED	    0x01 /* detached by micro-BFD (logical member) */
-#define ZEBRA_MBFD_F_PEND_DETACH    0x02 /* release requested, not seen yet */
-#define ZEBRA_MBFD_F_PEND_ATTACH    0x04 /* enslave requested, not seen yet */
-#define ZEBRA_MBFD_F_EXT_REENSLAVED 0x08 /* re-enslaved by someone else */
+#define ZEBRA_MBFD_F_DETACHED	    0x01 /* held down by micro-BFD */
+#define ZEBRA_MBFD_F_PEND_DETACH    0x02 /* admin down requested, not seen yet */
+#define ZEBRA_MBFD_F_PEND_ATTACH    0x04 /* admin up requested, not seen yet */
+#define ZEBRA_MBFD_F_EXT_REENSLAVED 0x08 /* set up by someone else while held down */
+#define ZEBRA_MBFD_F_WAS_UP	    0x10 /* admin up when held down: zebra set it down */
 
-/* External re-enslave guard back-off, seconds. */
+/* Guard against a member held down being set up by someone else, seconds. */
 #define ZEBRA_MBFD_GUARD_MIN 1
 #define ZEBRA_MBFD_GUARD_MAX 30
 

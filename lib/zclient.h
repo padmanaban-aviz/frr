@@ -1108,10 +1108,11 @@ zclient_interface_set_master(struct zclient *client, struct interface *master,
  * A client (bfdd) registers a bond with ZEBRA_LAG_MBFD_REGISTER. Zebra
  * answers with ZEBRA_LAG_MBFD_BOND_STATUS and, when the bond is usable,
  * sends one ZEBRA_LAG_MBFD_MEMBER_UPDATE per member, then one more on every
- * member change. ZEBRA_LAG_MBFD_DIST_SET asks zebra to take a member out
- * of the bond's distribution (detach) or put it back (attach).
- * ZEBRA_LAG_MBFD_UNREGISTER, or the client going away, re-attaches the
- * members the client detached, unless the bond was registered without
+ * member change. ZEBRA_LAG_MBFD_DIST_SET asks zebra to hold a member down
+ * ("detach": set it administratively down, it stays in the bond) or to
+ * release it ("attach": set it up again if zebra set it down).
+ * ZEBRA_LAG_MBFD_UNREGISTER, or the client going away, releases the
+ * members the client holds down, unless the bond was registered without
  * ZAPI_LAG_REG_F_FAIL_OPEN.
  *
  * The ZAPI header's VRF is the bond's VRF.
@@ -1122,7 +1123,7 @@ struct zapi_lag_register {
 	ifindex_t bond_ifindex;
 	uint8_t flags;
 };
-#define ZAPI_LAG_REG_F_FAIL_OPEN 0x01 /* re-attach members when the client goes away */
+#define ZAPI_LAG_REG_F_FAIL_OPEN 0x01 /* release members when the client goes away */
 
 /* ZEBRA_LAG_MBFD_BOND_STATUS (zebra -> client) */
 enum zapi_lag_bond_status_code {
@@ -1146,14 +1147,15 @@ struct zapi_lag_bond_status {
 #define ZAPI_LAG_MBR_DEL    3 /* member left the bond for good */
 
 #define ZAPI_LAG_MBR_F_KERNEL_ATTACHED 0x0001 /* enslaved in the kernel */
-#define ZAPI_LAG_MBR_F_MBFD_DETACHED   0x0002 /* detached by micro-BFD (logical member) */
-#define ZAPI_LAG_MBR_F_PENDING	       0x0004 /* detach/attach not confirmed by the kernel yet */
+#define ZAPI_LAG_MBR_F_MBFD_DETACHED   0x0002 /* held down by micro-BFD */
+#define ZAPI_LAG_MBR_F_PENDING	       0x0004 /* hold/release not confirmed by the kernel yet */
 #define ZAPI_LAG_MBR_F_OPER_UP	       0x0008 /* operationally up (carrier) */
 #define ZAPI_LAG_MBR_F_ADMIN_UP	       0x0010 /* administratively up */
 #define ZAPI_LAG_MBR_F_PROTODOWN       0x0020 /* protodown */
 #define ZAPI_LAG_MBR_F_DISTRIBUTING    0x0040 /* carries the bond's traffic */
 #define ZAPI_LAG_MBR_F_AD_STATE_VALID  0x0080 /* ad_actor_state is meaningful */
-#define ZAPI_LAG_MBR_F_EXT_REENSLAVED  0x0100 /* re-enslaved by someone else */
+#define ZAPI_LAG_MBR_F_EXT_REENSLAVED  0x0100 /* held down, but set up by someone else */
+#define ZAPI_LAG_MBR_F_STANDBY	       0x0200 /* LACP standby: aggregator not the active one */
 
 struct zapi_lag_member {
 	uint8_t op;
@@ -1169,10 +1171,9 @@ struct zapi_lag_member {
 struct zapi_lag_dist {
 	ifindex_t bond_ifindex;
 	ifindex_t mbr_ifindex;
-	uint8_t enable; /* 1 = attach (re-admit), 0 = detach */
-	uint8_t flags;
+	uint8_t enable; /* 1 = attach (release), 0 = detach (hold down) */
+	uint8_t flags;	/* none defined */
 };
-#define ZAPI_LAG_DIST_F_RESTORE_MAC 0x01 /* on detach, give the member the bond's MAC */
 
 extern int zapi_lag_register_encode(struct stream *s, uint16_t cmd, vrf_id_t vrf_id,
 				    const struct zapi_lag_register *reg);

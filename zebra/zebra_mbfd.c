@@ -9,24 +9,24 @@
  * - ZEBRA_LAG_MBFD_REGISTER: track this bond. Zebra answers with
  *   ZEBRA_LAG_MBFD_BOND_STATUS and, when the bond is usable, a
  *   ZEBRA_LAG_MBFD_MEMBER_UPDATE per member, then one per member change.
- * - ZEBRA_LAG_MBFD_DIST_SET: take a member out of the bond (detach) or put
- *   it back (attach).
+ * - ZEBRA_LAG_MBFD_DIST_SET: hold a member down ("detach") or release it
+ *   ("attach").
  *
- * Detach releases the member from the bond, then sets it up again so its
- * micro-BFD session keeps running (the bonding driver closes a released
- * member). Attach sets the member down and enslaves it in one request (the
- * bonding driver refuses an up interface). While detached, the member stays
- * a "logical" member here (zebra_if->mbfd.home_bond), and is still
- * reported to the client.
+ * Holding a member down sets it administratively down: it stays in the
+ * bond, the bond stops using it, and the peer loses carrier at once.
+ * Releasing it sets it up again, but only if it was up when micro-BFD set
+ * it down (a member the operator set down stays down); LACP then
+ * negotiates on it again. zebra_if->mbfd.home_bond keeps the bond of a
+ * member held down, and WAS_UP whether zebra must set it up again.
  *
  * Fail-open: when the client unregisters or goes away (including zebra's own
- * shutdown, which closes clients first), detached members are re-attached,
- * unless the bond was registered without ZAPI_LAG_REG_F_FAIL_OPEN. Detached
- * members are recorded in a state file so a restarted zebra can re-attach
- * (fail-open) or keep (fail-closed) them.
+ * shutdown, which closes clients first), members held down are released,
+ * unless the bond was registered without ZAPI_LAG_REG_F_FAIL_OPEN. They are
+ * recorded in a state file so a restarted zebra can release (fail-open) or
+ * keep holding (fail-closed) them.
  *
- * If something else (an operator, NetworkManager, ...) re-enslaves a
- * member micro-BFD keeps detached, zebra releases it again with back-off.
+ * If something else (an operator, NetworkManager, ...) sets up a member
+ * micro-BFD holds down, zebra sets it down again with back-off.
  *
  * Copyright (C) 2026 Aviz Networks
  */
@@ -87,6 +87,7 @@ struct mbfd_saved {
 	char mname[IFNAMSIZ + 1];
 	char bname[IFNAMSIZ + 1];
 	int failopen;
+	int was_up;
 };
 DECLARE_DLIST(mbfd_saved, struct mbfd_saved, item);
 
@@ -306,6 +307,23 @@ static uint16_t mbfd_member_flags(const struct interface *ifp, ifindex_t bond_if
 	if (distributing)
 		SET_FLAG(flags, ZAPI_LAG_MBR_F_DISTRIBUTING);
 
+	/*
+	 * Standby (RFC 7130, Section 3): aggregated with a partner (LACP
+	 * running, partner information current) in an aggregator that isn't
+	 * the bond's active one, ready to take over. Linux keeps such a port
+	 * out of sync, so Sync can't tell; a port whose partner timed out
+	 * (expired, defaulted) sits in an aggregator of its own and isn't
+	 * standby.
+	 */
+	if (attached && oper_up && !distributing && bzif && bzif->bond_info.mode_valid &&
+	    bzif->bond_info.mode == ZEBRA_BOND_MODE_8023AD && zif->mbfd.agg_valid &&
+	    zif->mbfd.agg_id && zif->mbfd.agg_id != zif->mbfd.active_agg_id &&
+	    zif->bondslave_info.ad_actor_state_valid &&
+	    CHECK_FLAG(zif->bondslave_info.ad_actor_oper_state, ZEBRA_LACP_STATE_AGGREGATION) &&
+	    !CHECK_FLAG(zif->bondslave_info.ad_actor_oper_state,
+			ZEBRA_LACP_STATE_DEFAULTED | ZEBRA_LACP_STATE_EXPIRED))
+		SET_FLAG(flags, ZAPI_LAG_MBR_F_STANDBY);
+
 	return flags;
 }
 
@@ -463,27 +481,39 @@ static void mbfd_member_clear(struct zebra_if *zif)
 	event_cancel(&zif->mbfd.t_guard);
 }
 
-/* Put a member micro-BFD detached back into its bond (fail-open). */
+/* Release a member micro-BFD holds down (fail-open). */
 static void mbfd_member_reattach(struct interface *ifp)
 {
 	struct zebra_if *zif = ifp->info;
 	struct zebra_ns *zns = mbfd_if_zns(ifp);
 	ifindex_t home = zif->mbfd.home_bond;
 	struct interface *bond = zns ? if_lookup_by_index_per_ns(zns, home) : NULL;
+	bool was_up = CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP);
 
 	mbfd_member_clear(zif);
 
-	if (!bond || !IS_ZEBRA_IF_BOND(bond) || mbfd_kernel_bond(ifp) == home)
+	if (!bond || !IS_ZEBRA_IF_BOND(bond))
 		return;
 
-	zlog_info("micro-BFD: re-attaching %s to %s (fail-open)", ifp->name, bond->name);
+	/* Out of its bond (state file of an older zebra): put it back. */
+	if (mbfd_kernel_bond(ifp) != home) {
+		zlog_info("micro-BFD: re-attaching %s to %s (fail-open)", ifp->name, bond->name);
+		if (dplane_intf_set_master(ifp, bond, mbfd_enslave_flags(ifp)) ==
+			    ZEBRA_DPLANE_REQUEST_FAILURE &&
+		    zns)
+			kernel_intf_set_master_sync(zns, ifp->ifindex, true, bond->ifindex,
+						    DPLANE_INTF_ADMIN_DOWN, NULL);
+		return;
+	}
 
-	if (dplane_intf_set_master(ifp, bond, mbfd_enslave_flags(ifp)) ==
-		    ZEBRA_DPLANE_REQUEST_FAILURE &&
-	    zns)
+	if (!was_up || mbfd_admin_up(ifp))
+		return;
+
+	zlog_info("micro-BFD: releasing %s (fail-open), setting it up", ifp->name);
+	if (dplane_intf_set_admin(ifp, true) == ZEBRA_DPLANE_REQUEST_FAILURE && zns)
 		/* Dataplane gone (late in shutdown): do it synchronously. */
-		kernel_intf_set_master_sync(zns, ifp->ifindex, true, bond->ifindex,
-					    DPLANE_INTF_ADMIN_DOWN, NULL);
+		kernel_intf_set_master_sync(zns, ifp->ifindex, false, IFINDEX_INTERNAL,
+					    DPLANE_INTF_ADMIN_UP, NULL);
 }
 
 static void mbfd_guard_schedule(struct interface *ifp)
@@ -506,15 +536,14 @@ static void mbfd_guard_cb(struct event *t)
 	struct zebra_if *zif = ifp->info;
 
 	if (!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED) ||
-	    CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH) ||
-	    mbfd_kernel_bond(ifp) != zif->mbfd.home_bond)
+	    CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH) || !mbfd_admin_up(ifp))
 		return;
 
-	zlog_info("micro-BFD: %s re-enslaved by someone else, releasing it again", ifp->name);
+	zlog_info("micro-BFD: %s set up by someone else while held down, setting it down again",
+		  ifp->name);
 
-	SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH);
-	if (dplane_intf_release_master(ifp, mbfd_admin_up(ifp), NULL) ==
-	    ZEBRA_DPLANE_REQUEST_FAILURE)
+	SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH | ZEBRA_MBFD_F_WAS_UP);
+	if (dplane_intf_set_admin(ifp, false) == ZEBRA_DPLANE_REQUEST_FAILURE)
 		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH);
 
 	zif->mbfd.guard_backoff = MIN(zif->mbfd.guard_backoff * 2, ZEBRA_MBFD_GUARD_MAX);
@@ -522,7 +551,7 @@ static void mbfd_guard_cb(struct event *t)
 }
 
 /*
- * Reconcile a detached member with what the kernel now reports: confirm
+ * Reconcile a member held down with what the kernel now reports: confirm
  * pending requests, and catch external changes.
  */
 static void mbfd_member_kernel_change(struct interface *ifp)
@@ -530,50 +559,49 @@ static void mbfd_member_kernel_change(struct interface *ifp)
 	struct zebra_if *zif = ifp->info;
 	ifindex_t kbond = mbfd_kernel_bond(ifp);
 	ifindex_t home = zif->mbfd.home_bond;
+	bool up = if_is_up(ifp);
 
 	if (!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED))
 		return;
 
+	if (kbond != home) {
+		/* Taken out of its bond by an operator: no longer ours. */
+		zlog_info("micro-BFD: %s left bond ifindex %u while held down, dropping its micro-BFD state",
+			  ifp->name, home);
+		mbfd_member_clear(zif);
+		mbfd_state_write();
+		return;
+	}
+
 	if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH)) {
-		if (kbond == home) {
-			/* Attach confirmed. */
+		if (up) {
+			/* Release confirmed. */
 			if (IS_ZEBRA_DEBUG_EVENT)
-				zlog_debug("micro-BFD: %s attached to bond ifindex %u", ifp->name,
-					   home);
+				zlog_debug("micro-BFD: %s released", ifp->name);
 			mbfd_member_clear(zif);
 			mbfd_state_write();
 		}
 		return;
 	}
 
-	if (kbond == IFINDEX_INTERNAL) {
+	if (!up) {
 		if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH)) {
-			/* Detach confirmed. */
+			/* Hold confirmed. */
 			if (IS_ZEBRA_DEBUG_EVENT)
-				zlog_debug("micro-BFD: %s detached from bond ifindex %u",
-					   ifp->name, home);
+				zlog_debug("micro-BFD: %s held down", ifp->name);
 			UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH);
 		}
 		return;
 	}
 
-	if (kbond == home) {
-		if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH))
-			return; /* our release is not through yet */
+	if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH))
+		return; /* our admin down is not through yet */
 
-		if (!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED))
-			zlog_warn("micro-BFD: %s was put back into its bond by someone else while micro-BFD keeps it detached; releasing it again (check NetworkManager / systemd-networkd / ifupdown)",
-				  ifp->name);
-		SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED);
-		mbfd_guard_schedule(ifp);
-		return;
-	}
-
-	/* Moved to another bond by an operator: no longer ours. */
-	zlog_info("micro-BFD: %s moved from bond ifindex %u to ifindex %u, dropping its micro-BFD state",
-		  ifp->name, home, kbond);
-	mbfd_member_clear(zif);
-	mbfd_state_write();
+	if (!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED))
+		zlog_warn("micro-BFD: %s was set up by someone else while micro-BFD holds it down; setting it down again (remove the lag configuration to release it)",
+			  ifp->name);
+	SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED);
+	mbfd_guard_schedule(ifp);
 }
 
 /*
@@ -587,48 +615,92 @@ static void mbfd_member_kernel_change(struct interface *ifp)
  * report changes the kernel didn't. Linux only, and only in zebra's own
  * network namespace (sysfs shows that one).
  */
-static bool mbfd_ad_state_read(const struct interface *ifp, uint8_t *state)
+static bool mbfd_sysfs_uint(const char *path, unsigned int max, unsigned int *val)
 {
 #ifdef GNU_LINUX
-	char path[128], buf[16];
-	unsigned int val;
+	char buf[16];
 	bool ok;
 	FILE *fp;
 
-	snprintf(path, sizeof(path), "/sys/class/net/%s/bonding_slave/ad_actor_oper_port_state",
-		 ifp->name);
 	fp = fopen(path, "r");
 	if (!fp)
 		return false;
-	ok = fgets(buf, sizeof(buf), fp) && sscanf(buf, "%u", &val) == 1 && val <= UINT8_MAX;
+	ok = fgets(buf, sizeof(buf), fp) && sscanf(buf, "%u", val) == 1 && *val <= max;
 	fclose(fp);
-	if (ok)
-		*state = val;
 	return ok;
 #else
 	return false;
 #endif
 }
 
+static bool mbfd_ad_state_read(const struct interface *ifp, uint8_t *state)
+{
+	char path[128];
+	unsigned int val;
+
+	snprintf(path, sizeof(path), "/sys/class/net/%s/bonding_slave/ad_actor_oper_port_state",
+		 ifp->name);
+	if (!mbfd_sysfs_uint(path, UINT8_MAX, &val))
+		return false;
+	*state = val;
+	return true;
+}
+
+/* The member's 802.3ad aggregator and the bond's active one (standby). */
+static bool mbfd_agg_read(const struct interface *ifp, const struct interface *bond, uint16_t *agg,
+			  uint16_t *active)
+{
+	char path[128];
+	unsigned int a, b;
+
+	snprintf(path, sizeof(path), "/sys/class/net/%s/bonding_slave/ad_aggregator_id", ifp->name);
+	if (!mbfd_sysfs_uint(path, UINT16_MAX, &a))
+		return false;
+	snprintf(path, sizeof(path), "/sys/class/net/%s/bonding/ad_aggregator", bond->name);
+	if (!mbfd_sysfs_uint(path, UINT16_MAX, &b))
+		return false;
+	*agg = a;
+	*active = b;
+	return true;
+}
+
 static void mbfd_ad_poll_member(struct interface *ifp, void *arg)
 {
 	struct zebra_if *zif = ifp->info;
 	ifindex_t bond = mbfd_kernel_bond(ifp);
+	struct interface *bifp;
+	uint16_t agg = 0, active = 0;
+	bool agg_valid, changed = false;
 	uint8_t state;
 
 	if (bond == IFINDEX_INTERNAL || !zif->bondslave_info.ad_actor_state_valid)
 		return;
 	if (!mbfd_reg_find(mbfd_if_zns(ifp), bond))
 		return;
-	if (!mbfd_ad_state_read(ifp, &state) || state == zif->bondslave_info.ad_actor_oper_state)
-		return;
 
-	if (IS_ZEBRA_DEBUG_EVENT)
-		zlog_debug("micro-BFD: %s LACP actor state 0x%02x -> 0x%02x (not reported by the kernel)",
-			   ifp->name, zif->bondslave_info.ad_actor_oper_state, state);
+	if (mbfd_ad_state_read(ifp, &state) && state != zif->bondslave_info.ad_actor_oper_state) {
+		if (IS_ZEBRA_DEBUG_EVENT)
+			zlog_debug("micro-BFD: %s LACP actor state 0x%02x -> 0x%02x (not reported by the kernel)",
+				   ifp->name, zif->bondslave_info.ad_actor_oper_state, state);
+		zif->bondslave_info.ad_actor_oper_state = state;
+		changed = true;
+	}
 
-	zif->bondslave_info.ad_actor_oper_state = state;
-	zebra_mbfd_if_update(ifp);
+	bifp = if_lookup_by_index_per_ns(mbfd_if_zns(ifp), bond);
+	agg_valid = bifp && mbfd_agg_read(ifp, bifp, &agg, &active);
+	if (agg_valid != zif->mbfd.agg_valid || agg != zif->mbfd.agg_id ||
+	    active != zif->mbfd.active_agg_id) {
+		if (IS_ZEBRA_DEBUG_EVENT)
+			zlog_debug("micro-BFD: %s aggregator %u, active %u%s", ifp->name, agg,
+				   active, agg_valid ? "" : " (unknown)");
+		zif->mbfd.agg_valid = agg_valid;
+		zif->mbfd.agg_id = agg;
+		zif->mbfd.active_agg_id = active;
+		changed = true;
+	}
+
+	if (changed)
+		zebra_mbfd_if_update(ifp);
 }
 
 static void mbfd_ad_poll_cb(struct event *t)
@@ -748,17 +820,16 @@ void zebra_mbfd_dplane_result(struct interface *ifp, bool set_master, bool succe
 {
 	struct zebra_if *zif = ifp->info;
 
-	/* Only the master change itself matters, not the follow-up up/MAC. */
-	if (!zif || success || !set_master)
+	if (!zif || success)
 		return;
 
 	if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH)) {
-		zlog_warn("micro-BFD: attaching %s failed, it stays detached", ifp->name);
+		zlog_warn("micro-BFD: releasing %s failed, it stays held down", ifp->name);
 		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH);
 	} else if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH)) {
-		zlog_warn("micro-BFD: detaching %s failed", ifp->name);
+		zlog_warn("micro-BFD: holding %s down failed", ifp->name);
 		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH);
-		if (mbfd_kernel_bond(ifp) == zif->mbfd.home_bond)
+		if (if_is_up(ifp))
 			mbfd_member_clear(zif);
 	} else {
 		return;
@@ -793,14 +864,14 @@ static void mbfd_release_cb(struct interface *ifp, void *arg)
 		ra->changed = true;
 	} else {
 		/*
-		 * Fail-closed: the member stays detached (and guarded); a pending
+		 * Fail-closed: the member stays held down (and guarded); a pending
 		 * attach is abandoned.
 		 */
 		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH);
 	}
 }
 
-/* Drop a registration; re-attach its detached members if `reattach`. */
+/* Drop a registration; release the members it holds down if `reattach`. */
 static void mbfd_reg_release(struct mbfd_reg *reg, bool reattach)
 {
 	struct mbfd_release_arg ra = { .bond = reg->bond_ifindex, .reattach = reattach };
@@ -902,52 +973,47 @@ void zebra_mbfd_dist_set(struct zserv *client, struct zmsghdr *hdr, struct strea
 	}
 
 	if (!dist.enable) {
-		/* Detach */
+		/* Hold down */
 		if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED) &&
 		    !CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH)) {
 			mbfd_notify_member(ifp);
 			return;
 		}
 
-		zlog_info("micro-BFD: detaching %s from %s", ifp->name, bond->name);
+		zlog_info("micro-BFD: holding %s down (bond %s)", ifp->name, bond->name);
 
 		event_cancel(&zif->mbfd.t_guard);
+		zif->mbfd.guard_backoff = 0;
 		zif->mbfd.home_bond = dist.bond_ifindex;
-		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH | ZEBRA_MBFD_F_EXT_REENSLAVED);
+		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH | ZEBRA_MBFD_F_EXT_REENSLAVED |
+						    ZEBRA_MBFD_F_WAS_UP);
 		SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED);
 
-		if (mbfd_kernel_bond(ifp) == dist.bond_ifindex) {
-			const uint8_t *mac = NULL;
-
-			if (CHECK_FLAG(dist.flags, ZAPI_LAG_DIST_F_RESTORE_MAC) &&
-			    bond->hw_addr_len == ETH_ALEN)
-				mac = bond->hw_addr;
-
-			SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH);
-			/* Up again if it was: micro-BFD keeps testing it. */
-			if (dplane_intf_release_master(ifp, mbfd_admin_up(ifp), mac) ==
-			    ZEBRA_DPLANE_REQUEST_FAILURE)
+		/* Already down (the operator's): nothing to do, nothing to undo. */
+		if (mbfd_admin_up(ifp)) {
+			SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP | ZEBRA_MBFD_F_PEND_DETACH);
+			if (dplane_intf_set_admin(ifp, false) == ZEBRA_DPLANE_REQUEST_FAILURE)
 				mbfd_member_clear(zif);
 		}
 	} else {
-		/* Attach */
+		/* Release */
 		if (!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED) ||
 		    CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH)) {
 			mbfd_notify_member(ifp);
 			return;
 		}
 
-		zlog_info("micro-BFD: attaching %s to %s", ifp->name, bond->name);
+		zlog_info("micro-BFD: releasing %s (bond %s)", ifp->name, bond->name);
 
 		event_cancel(&zif->mbfd.t_guard);
 		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_DETACH);
 
-		if (mbfd_kernel_bond(ifp) == dist.bond_ifindex) {
+		if (!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP) || mbfd_admin_up(ifp)) {
+			/* It stays as the operator left it. */
 			mbfd_member_clear(zif);
 		} else {
 			SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH);
-			if (dplane_intf_set_master(ifp, bond, mbfd_enslave_flags(ifp)) ==
-			    ZEBRA_DPLANE_REQUEST_FAILURE)
+			if (dplane_intf_set_admin(ifp, true) == ZEBRA_DPLANE_REQUEST_FAILURE)
 				UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH);
 		}
 	}
@@ -968,8 +1034,8 @@ static int mbfd_client_close(struct zserv *client)
 		zlog_info("micro-BFD: %s gone, bond ifindex %u %s",
 			  zebra_route_string(client->proto), reg->bond_ifindex,
 			  CHECK_FLAG(reg->flags, ZAPI_LAG_REG_F_FAIL_OPEN)
-				  ? "fail-open: re-attaching detached members"
-				  : "fail-closed: keeping detached members out");
+				  ? "fail-open: releasing members held down"
+				  : "fail-closed: keeping members held down");
 		mbfd_reg_release(reg, CHECK_FLAG(reg->flags, ZAPI_LAG_REG_F_FAIL_OPEN));
 	}
 
@@ -977,9 +1043,10 @@ static int mbfd_client_close(struct zserv *client)
 }
 
 /*
- * State file: detached members, so that a restarted zebra re-attaches
- * (fail-open) or keeps out (fail-closed) members it no longer knows about.
- * One line per member: "<member> <bond> <fail-open 0|1>".
+ * State file: members held down, so that a restarted zebra releases
+ * (fail-open) or keeps holding (fail-closed) members it no longer knows
+ * about. One line per member: "<member> <bond> <fail-open 0|1> <was-up 0|1>"
+ * (an older zebra wrote no was-up: those members were out of the bond).
  */
 static void mbfd_state_path(char *buf, size_t len)
 {
@@ -1002,8 +1069,9 @@ static void mbfd_state_write_cb(struct interface *ifp, void *arg)
 		return;
 
 	reg = mbfd_reg_find(zns, zif->mbfd.home_bond);
-	fprintf(fp, "%s %s %d\n", ifp->name, bond->name,
-		reg ? !!CHECK_FLAG(reg->flags, ZAPI_LAG_REG_F_FAIL_OPEN) : 0);
+	fprintf(fp, "%s %s %d %d\n", ifp->name, bond->name,
+		reg ? !!CHECK_FLAG(reg->flags, ZAPI_LAG_REG_F_FAIL_OPEN) : 0,
+		!!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP));
 }
 
 static struct interface *mbfd_if_by_name(const char *name)
@@ -1044,7 +1112,7 @@ static void mbfd_state_write(void)
 
 		if (zif && CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED))
 			continue;
-		fprintf(fp, "%s %s %d\n", sv->mname, sv->bname, sv->failopen);
+		fprintf(fp, "%s %s %d %d\n", sv->mname, sv->bname, sv->failopen, sv->was_up);
 	}
 	fclose(fp);
 
@@ -1072,7 +1140,9 @@ static void mbfd_state_load(void)
 
 	while (fgets(line, sizeof(line), fp)) {
 		sv = XCALLOC(MTYPE_ZEBRA_MBFD_SAVED, sizeof(*sv));
-		if (sscanf(line, "%16s %16s %d", sv->mname, sv->bname, &sv->failopen) != 3) {
+		sv->was_up = 1;
+		if (sscanf(line, "%16s %16s %d %d", sv->mname, sv->bname, &sv->failopen,
+			   &sv->was_up) < 3) {
 			XFREE(MTYPE_ZEBRA_MBFD_SAVED, sv);
 			continue;
 		}
@@ -1109,16 +1179,36 @@ static void mbfd_state_read_cb(struct event *t)
 
 		if (sv->failopen) {
 			if (mbfd_kernel_bond(mifp) != bifp->ifindex) {
-				zlog_info("micro-BFD: %s was detached before zebra restarted, re-attaching it to %s (fail-open)",
+				zlog_info("micro-BFD: %s was out of %s before zebra restarted, re-attaching it (fail-open)",
 					  mifp->name, bifp->name);
 				dplane_intf_set_master(mifp, bifp, mbfd_enslave_flags(mifp));
+			} else if (sv->was_up && !mbfd_admin_up(mifp)) {
+				zlog_info("micro-BFD: %s was held down before zebra restarted, setting it up (fail-open)",
+					  mifp->name);
+				dplane_intf_set_admin(mifp, true);
 			}
-		} else {
-			zlog_info("micro-BFD: %s was detached before zebra restarted, keeping it out of %s (fail-closed)",
-				  mifp->name, bifp->name);
+		} else if (mbfd_kernel_bond(mifp) == bifp->ifindex) {
+			zlog_info("micro-BFD: %s was held down before zebra restarted, keeping it down (fail-closed)",
+				  mifp->name);
 			zif->mbfd.home_bond = bifp->ifindex;
 			SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED);
-			mbfd_member_kernel_change(mifp);
+			if (sv->was_up)
+				SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP);
+			if (mbfd_admin_up(mifp)) {
+				SET_FLAG(zif->mbfd.flags,
+					 ZEBRA_MBFD_F_PEND_DETACH | ZEBRA_MBFD_F_WAS_UP);
+				dplane_intf_set_admin(mifp, false);
+			}
+			mbfd_notify_member(mifp);
+		} else {
+			zlog_info("micro-BFD: %s was out of %s before zebra restarted, putting it back held down (fail-closed)",
+				  mifp->name, bifp->name);
+			zif->mbfd.home_bond = bifp->ifindex;
+			SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED | ZEBRA_MBFD_F_WAS_UP |
+							  ZEBRA_MBFD_F_PEND_DETACH);
+			dplane_intf_set_master(mifp, bifp,
+					       DPLANE_INTF_MASTER_F_DOWN_FIRST |
+						       DPLANE_INTF_MASTER_F_DOWN_AFTER);
 			mbfd_notify_member(mifp);
 		}
 done:
@@ -1168,13 +1258,15 @@ void zebra_mbfd_if_show(struct vty *vty, json_object *json_if, struct interface 
 		json_object *jo = json_object_new_object();
 
 		json_object_int_add(jo, "bondIfindex", mbfd_member_bond(ifp));
-		json_object_boolean_add(jo, "detached",
+		json_object_boolean_add(jo, "heldDown",
 					CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED));
+		json_object_boolean_add(jo, "wasUp",
+					CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP));
 		json_object_boolean_add(jo, "pending",
 					CHECK_FLAG(zif->mbfd.flags,
 						   ZEBRA_MBFD_F_PEND_DETACH |
 							   ZEBRA_MBFD_F_PEND_ATTACH));
-		json_object_boolean_add(jo, "extReenslaved",
+		json_object_boolean_add(jo, "setUpExternally",
 					CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED));
 		json_object_string_add(jo, "reportedFlags",
 				       zif->mbfd.notified_bond
@@ -1185,13 +1277,15 @@ void zebra_mbfd_if_show(struct vty *vty, json_object *json_if, struct interface 
 	} else {
 		vty_out(vty, "  micro-BFD member of bond ifindex %u%s%s%s, reported: %s\n",
 			mbfd_member_bond(ifp),
-			CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED) ? ", detached" : "",
+			CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED)
+				? ", held down by micro-BFD"
+				: "",
 			CHECK_FLAG(zif->mbfd.flags,
 				   ZEBRA_MBFD_F_PEND_DETACH | ZEBRA_MBFD_F_PEND_ATTACH)
 				? ", pending"
 				: "",
 			CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED)
-				? ", re-enslaved externally"
+				? ", set up externally"
 				: "",
 			zif->mbfd.notified_bond
 				? zapi_lag_mbr_flags2str(zif->mbfd.last_flags, buf, sizeof(buf))

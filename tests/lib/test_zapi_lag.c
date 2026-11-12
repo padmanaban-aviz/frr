@@ -148,7 +148,7 @@ static void test_dist(void)
 	struct zapi_lag_dist in = { .bond_ifindex = 5,
 				    .mbr_ifindex = 6,
 				    .enable = 1,
-				    .flags = ZAPI_LAG_DIST_F_RESTORE_MAC },
+				    .flags = 0x01 },
 			     out;
 
 	CHECK(zapi_lag_dist_encode(s, 9, &in) == 0);
@@ -182,7 +182,7 @@ static void test_strings(void)
 		char t[sizeof(buf) + 1];
 
 		memset(t, 'X', sizeof(t));
-		zapi_lag_mbr_flags2str(0x01ff, t, len);
+		zapi_lag_mbr_flags2str(0x03ff, t, len);
 		CHECK(strlen(t) < len);
 		CHECK(t[len] == 'X');
 	}

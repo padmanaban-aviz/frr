@@ -1271,6 +1271,8 @@ enum zebra_dplane_result dplane_intf_set_master(const struct interface *ifp,
 						const struct interface *master, uint32_t flags);
 enum zebra_dplane_result dplane_intf_release_master(const struct interface *ifp, bool admin_up,
 						    const uint8_t *mac);
+/* Set `ifp` administratively up or down (its master unchanged). */
+enum zebra_dplane_result dplane_intf_set_admin(const struct interface *ifp, bool up);
 
 /*
  * Enqueue a GRE set

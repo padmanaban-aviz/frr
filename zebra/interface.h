@@ -175,10 +175,10 @@ struct zebra_if {
 
 	/* RFC 7130 micro-BFD state of a bond member (zebra_mbfd.c) */
 	struct {
-		/* bond the member belongs to while micro-BFD keeps it detached */
+		/* bond of the member while micro-BFD holds it down */
 		ifindex_t home_bond;
 		uint8_t flags; /* ZEBRA_MBFD_F_* */
-		/* external re-enslave guard */
+		/* guard against the member being set up while held down */
 		uint8_t guard_backoff;
 		struct event *t_guard;
 		/* last state reported to the client */
@@ -186,6 +186,10 @@ struct zebra_if {
 		uint16_t last_flags;
 		uint8_t last_ad_state;
 		uint8_t last_mac[ETH_ALEN];
+		/* 802.3ad aggregator of the member, and the bond's active one */
+		bool agg_valid;
+		uint16_t agg_id;
+		uint16_t active_agg_id;
 	} mbfd;
 
 	/* ethernet segment */

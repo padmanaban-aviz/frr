@@ -5255,7 +5255,8 @@ const char *zapi_lag_mbr_flags2str(uint16_t flags, char *buf, size_t len)
 		{ ZAPI_LAG_MBR_F_PROTODOWN, "protodown" },
 		{ ZAPI_LAG_MBR_F_DISTRIBUTING, "distributing" },
 		{ ZAPI_LAG_MBR_F_AD_STATE_VALID, "ad-state-valid" },
-		{ ZAPI_LAG_MBR_F_EXT_REENSLAVED, "ext-reenslaved" },
+		{ ZAPI_LAG_MBR_F_EXT_REENSLAVED, "ext-up" },
+		{ ZAPI_LAG_MBR_F_STANDBY, "standby" },
 	};
 	size_t pos = 0;
 
