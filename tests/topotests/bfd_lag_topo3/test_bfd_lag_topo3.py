@@ -304,11 +304,22 @@ def test_admin_down_hold():
         assert m["reason"] == "peer AdminDown, hold expired", m
         assert m["microBfdIpv4"]["adminDownHoldExpired"], m
 
-    # 0: as long as AdminDown lasts; members go back in.
+    # 0: as long as AdminDown lasts; members go back in. r1 deleted its
+    # sessions once LACP stopped there (RFC 7130, Section 3), and sends
+    # AdminDown again when the member distributes again.
     _conf(r2, "admin-down-hold 0")
+
+    def _back_admin_down(ifname):
+        err = _member_state(r2, ifname, "down", False)
+        if err:
+            return err
+        reason = _member(r2, ifname).get("reason")
+        if reason != "peer signalled AdminDown":
+            return "{}: reason {!r}".format(ifname, reason)
+        return None
+
     for ifname in MEMBERS["r2"]:
-        _expect(_member_state, r2, ifname, "down", False, count=30)
-        assert _member(r2, ifname)["reason"] == "peer signalled AdminDown"
+        _expect(_back_admin_down, ifname, count=60)
 
     # A new value applies to the hold already running: it started more than
     # 2 s ago, so 2000 ends it at once.
@@ -317,8 +328,10 @@ def test_admin_down_hold():
     for ifname in MEMBERS["r2"]:
         _expect(_member_state, r2, ifname, "down", True, count=20)
 
+    # r1 runs no sessions on members that don't distribute; r2's recovery
+    # probe puts its members back.
     _conf(r1, "no shutdown")
-    _expect(_all_up, tgen, count=90)
+    _expect(_all_up, tgen, count=150)
     _conf(r2, "no admin-down-hold")
     assert _lag(r2)["adminDownHold"] == 0
 

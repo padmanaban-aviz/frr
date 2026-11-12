@@ -348,8 +348,10 @@ def test_bfdd_restart():
     )
 
     start_router_daemons(tgen, "r1", ["bfdd"])
-    # The failure is still there: after enable-grace, out again.
-    _expect(_member_state, r1, "r1-eth1", None, True, False)
+    # The failure is still there. r2 keeps its end out, so r1-eth1 doesn't
+    # distribute and runs no sessions; r2's recovery probe puts its end
+    # back, the sessions start and fail: out again.
+    _expect(_member_state, r1, "r1-eth1", None, True, False, count=150)
     _expect(_member_state, r1, "r1-eth0", "up", False)
 
     _drop_mbfd(r2, "r2-eth1", False)
@@ -364,19 +366,30 @@ def _admin_up(router, ifname):
     return "UP" in link.get("flags", [])
 
 
+def _no_sessions(router, ifname):
+    m = _member(router, ifname)
+    if m.get("microBfdIpv4") or m.get("sessionActive"):
+        return "{}: {} still has sessions".format(router.name, ifname)
+    if m.get("detached"):
+        return "{}: {} taken out".format(router.name, ifname)
+    return None
+
+
 def test_admin_down_respected():
-    "A member the operator sets down stays down: micro-BFD doesn't undo it."
+    "A member set down stops distributing: sessions deleted, not taken out, stays down."
     tgen = get_topogen()
     _skip(tgen)
     r1 = tgen.gears["r1"]
 
+    d = _member(r1, "r1-eth1")["detachCount"]
     r1.run("ip link set r1-eth1 down")
-    # No carrier: sessions down, micro-BFD takes it out of the bond...
-    _expect(_member_state, r1, "r1-eth1", None, True, False, count=30)
-    # ... but leaves it down.
+    # RFC 7130, Section 3: not distributing, so no sessions; and a member
+    # that doesn't distribute is not taken out.
+    _expect(_no_sessions, r1, "r1-eth1", count=30)
     topotest.sleep(5, "member stays down")
-    assert _admin_up(r1, "r1-eth1") is False, "micro-BFD set r1-eth1 up"
-    assert _master(r1, "r1-eth1") == ""
+    assert _admin_up(r1, "r1-eth1") is False, "r1-eth1 set up again"
+    assert _master(r1, "r1-eth1") == "bond0"
+    assert _member(r1, "r1-eth1")["detachCount"] == d
 
     r1.run("ip link set r1-eth1 up")
     _expect(_all_up, tgen, count=90)
