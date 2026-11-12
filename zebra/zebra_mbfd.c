@@ -32,6 +32,7 @@
  */
 
 #include <zebra.h>
+#include <sys/ioctl.h>
 #include <sys/stat.h>
 
 #include "lib/if.h"
@@ -42,6 +43,7 @@
 
 #include "zebra/debug.h"
 #include "zebra/interface.h"
+#include "zebra/ioctl.h"
 #include "zebra/rt.h"
 #include "zebra/zebra_dplane.h"
 #include "zebra/zebra_l2.h"
@@ -105,10 +107,21 @@ static void mbfd_ad_poll_schedule(void);
  * Micro-BFD moves members in and out of their bond, but never changes their
  * administrative state: a member the operator set down stays down, out of
  * the bond or back in it.
+ *
+ * Ask the kernel rather than trust ifp->flags: when a member is set down,
+ * its sessions can fail, and bfdd ask for it to be taken out, before zebra
+ * has read the netlink event; setting it up after the release would then
+ * undo the operator's "down".
  */
 static bool mbfd_admin_up(const struct interface *ifp)
 {
-	return CHECK_FLAG(ifp->flags, IFF_UP);
+	struct ifreq ifr = {};
+
+	strlcpy(ifr.ifr_name, ifp->name, sizeof(ifr.ifr_name));
+	if (vrf_if_ioctl(SIOCGIFFLAGS, (caddr_t)&ifr, ifp->vrf->vrf_id) < 0)
+		return CHECK_FLAG(ifp->flags, IFF_UP);
+
+	return CHECK_FLAG(ifr.ifr_flags, IFF_UP);
 }
 
 static uint32_t mbfd_enslave_flags(const struct interface *ifp)
