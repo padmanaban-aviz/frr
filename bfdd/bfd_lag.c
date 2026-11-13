@@ -492,15 +492,20 @@ static struct bfd_lag_member *lag_member_new(struct bfd_lag *lag, const struct z
 		m->s[af].m = m;
 		m->s[af].af = af;
 		m->s[af].port_sock = -1;
+		m->s[af].raw_sock = -1;
 	}
 	bfd_lag_members_add_tail(&lag->members, m);
 
 	return m;
 }
 
+static void lag_msess_raw_close(struct bfd_lag_msess *ms);
+
 static void lag_member_free(struct bfd_lag_member *m)
 {
 	lag_member_sessions_delete(m);
+	for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++)
+		lag_msess_raw_close(&m->s[af]);
 
 	event_cancel(&m->t_grace);
 	event_cancel(&m->t_settle);
@@ -1210,13 +1215,51 @@ static void lag_recv_cb(struct event *t);
 
 static void lag_msess_close(struct bfd_lag_msess *ms)
 {
-	event_cancel(&ms->t_read);
 	lag_admin_hold_stop(ms);
 	if (ms->port_sock != -1) {
 		close(ms->port_sock);
 		ms->port_sock = -1;
 	}
 }
+
+static void lag_msess_raw_close(struct bfd_lag_msess *ms)
+{
+	event_cancel(&ms->t_read);
+	if (ms->raw_sock != -1) {
+		close(ms->raw_sock);
+		ms->raw_sock = -1;
+	}
+}
+
+#ifdef BFD_LINUX
+/*
+ * The member's raw socket, opened with its first session and kept until the
+ * member goes: opening one joins the micro-BFD MAC and closing it leaves it,
+ * and both wait for the kernel's RTNL lock. That lock is held while a NIC
+ * changes state, which is exactly when sessions come and go (a member held
+ * down, LACP taking one out): bfdd would stall there, and the sessions on
+ * the other members with it, long enough for fast timers to expire (seen:
+ * 184 ms with mlx5). Kept open, sessions come and go without a system call
+ * that waits for it.
+ */
+static int lag_msess_raw(struct bfd_lag_msess *ms, struct vrf *vrf)
+{
+	struct bfd_lag_member *m = ms->m;
+
+	if (ms->raw_sock != -1 && (ms->raw_ifindex != m->ifindex || ms->raw_vrf_id != vrf->vrf_id))
+		lag_msess_raw_close(ms);
+	if (ms->raw_sock == -1) {
+		ms->raw_sock = lag_raw_socket(m, ms->af, vrf);
+		if (ms->raw_sock == -1)
+			return -1;
+		ms->raw_ifindex = m->ifindex;
+		ms->raw_vrf_id = vrf->vrf_id;
+	}
+	if (!ms->t_read)
+		event_add_read(master, lag_recv_cb, ms, ms->raw_sock, &ms->t_read);
+	return ms->raw_sock;
+}
+#endif /* BFD_LINUX */
 
 int bfd_lag_session_enable(struct bfd_session *bs)
 {
@@ -1252,7 +1295,7 @@ int bfd_lag_session_enable(struct bfd_session *bs)
 		return 0;
 	}
 
-	sd = lag_raw_socket(m, af, vrf);
+	sd = lag_msess_raw(ms, vrf);
 	if (sd < 0) {
 		close(ms->port_sock);
 		ms->port_sock = -1;
@@ -1265,7 +1308,6 @@ int bfd_lag_session_enable(struct bfd_session *bs)
 	addr2sa(af, &m->lag->af[af].local, &bs->local_address);
 
 	lag_sink_ref(vrf, af);
-	event_add_read(master, lag_recv_cb, ms, sd, &ms->t_read);
 
 	/* Micro-BFD is never passive: start right away. */
 	bfd_recvtimer_update(bs);
@@ -1284,11 +1326,11 @@ void bfd_lag_session_disable(struct bfd_session *bs)
 	if (m)
 		lag_msess_close(&m->s[af_of_session(bs)]);
 
+	/* The member keeps the socket (lag_msess_raw()). */
 	if (bs->sock != -1) {
 #ifdef BFD_LINUX
 		lag_sink_unref(bs->vrf, af_of_session(bs));
 #endif
-		close(bs->sock);
 		bs->sock = -1;
 	}
 

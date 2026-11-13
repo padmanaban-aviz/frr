@@ -164,6 +164,13 @@ struct bfd_lag_msess {
 	struct bfd_session *bs;
 	int port_sock; /* keeps the session's UDP source port reserved */
 	uint16_t sport;
+	/*
+	 * The member's raw socket for this family, kept for as long as the
+	 * member exists (see lag_msess_raw()); t_read reads it.
+	 */
+	int raw_sock;
+	ifindex_t raw_ifindex;
+	vrf_id_t raw_vrf_id;
 	struct event *t_read;
 	bool peer_admin_down;
 	/* admin-down-hold: when AdminDown came, and whether the hold is over. */
