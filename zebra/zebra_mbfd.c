@@ -251,6 +251,42 @@ static uint8_t mbfd_bond_status(const struct mbfd_reg *reg, uint8_t *mode, uint8
 	return ZAPI_LAG_BOND_OK;
 }
 
+/*
+ * Standby (RFC 7130, Section 3): aggregated with a partner (LACP running,
+ * partner information current) in an aggregator that isn't the bond's
+ * active one, while the bond is up on that active one: ready to take over.
+ * Linux keeps such a port out of sync, so Sync can't tell; a port whose
+ * partner timed out (expired, defaulted) sits in an aggregator of its own
+ * and isn't standby. While LACP negotiates, ports pass through aggregators
+ * of their own too: the poll reports standby only once it lasted
+ * MBFD_STANDBY_STABLE_MS.
+ */
+#define MBFD_STANDBY_STABLE_MS 3000
+
+static bool mbfd_standby_now(const struct interface *ifp, ifindex_t bond_ifindex)
+{
+	const struct zebra_if *zif = ifp->info;
+	struct interface *bond;
+	const struct zebra_if *bzif;
+
+	if (mbfd_kernel_bond(ifp) != bond_ifindex || !if_is_operative(ifp))
+		return false;
+	bond = if_lookup_by_index_per_ns(mbfd_if_zns(ifp), bond_ifindex);
+	bzif = bond ? bond->info : NULL;
+	if (!bzif || !bzif->bond_info.mode_valid ||
+	    bzif->bond_info.mode != ZEBRA_BOND_MODE_8023AD || !if_is_operative(bond))
+		return false;
+	if (!zif->mbfd.agg_valid || !zif->mbfd.agg_id ||
+	    zif->mbfd.agg_id == zif->mbfd.active_agg_id ||
+	    !zif->bondslave_info.ad_actor_state_valid)
+		return false;
+	if (CHECK_FLAG(zif->bondslave_info.ad_actor_oper_state, ZEBRA_LACP_STATE_DISTRIBUTING))
+		return false;
+	return CHECK_FLAG(zif->bondslave_info.ad_actor_oper_state, ZEBRA_LACP_STATE_AGGREGATION) &&
+	       !CHECK_FLAG(zif->bondslave_info.ad_actor_oper_state,
+			   ZEBRA_LACP_STATE_DEFAULTED | ZEBRA_LACP_STATE_EXPIRED);
+}
+
 /* Member flags as reported to the client (ZAPI_LAG_MBR_F_*). */
 static uint16_t mbfd_member_flags(const struct interface *ifp, ifindex_t bond_ifindex,
 				  uint8_t *ad_state)
@@ -307,21 +343,8 @@ static uint16_t mbfd_member_flags(const struct interface *ifp, ifindex_t bond_if
 	if (distributing)
 		SET_FLAG(flags, ZAPI_LAG_MBR_F_DISTRIBUTING);
 
-	/*
-	 * Standby (RFC 7130, Section 3): aggregated with a partner (LACP
-	 * running, partner information current) in an aggregator that isn't
-	 * the bond's active one, ready to take over. Linux keeps such a port
-	 * out of sync, so Sync can't tell; a port whose partner timed out
-	 * (expired, defaulted) sits in an aggregator of its own and isn't
-	 * standby.
-	 */
-	if (attached && oper_up && !distributing && bzif && bzif->bond_info.mode_valid &&
-	    bzif->bond_info.mode == ZEBRA_BOND_MODE_8023AD && zif->mbfd.agg_valid &&
-	    zif->mbfd.agg_id && zif->mbfd.agg_id != zif->mbfd.active_agg_id &&
-	    zif->bondslave_info.ad_actor_state_valid &&
-	    CHECK_FLAG(zif->bondslave_info.ad_actor_oper_state, ZEBRA_LACP_STATE_AGGREGATION) &&
-	    !CHECK_FLAG(zif->bondslave_info.ad_actor_oper_state,
-			ZEBRA_LACP_STATE_DEFAULTED | ZEBRA_LACP_STATE_EXPIRED))
+	/* Standby: as the poll last saw it, and still so now. */
+	if (!distributing && zif->mbfd.standby && mbfd_standby_now(ifp, bond_ifindex))
 		SET_FLAG(flags, ZAPI_LAG_MBR_F_STANDBY);
 
 	return flags;
@@ -697,6 +720,23 @@ static void mbfd_ad_poll_member(struct interface *ifp, void *arg)
 		zif->mbfd.agg_id = agg;
 		zif->mbfd.active_agg_id = active;
 		changed = true;
+	}
+
+	/* Standby only once it lasted (see mbfd_standby_now()). */
+	if (!mbfd_standby_now(ifp, bond)) {
+		timerclear(&zif->mbfd.standby_since);
+		if (zif->mbfd.standby) {
+			zif->mbfd.standby = false;
+			changed = true;
+		}
+	} else if (!zif->mbfd.standby) {
+		if (!timerisset(&zif->mbfd.standby_since))
+			monotime(&zif->mbfd.standby_since);
+		else if (monotime_since(&zif->mbfd.standby_since, NULL) / 1000 >=
+			 MBFD_STANDBY_STABLE_MS) {
+			zif->mbfd.standby = true;
+			changed = true;
+		}
 	}
 
 	if (changed)

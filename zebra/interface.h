@@ -190,6 +190,9 @@ struct zebra_if {
 		bool agg_valid;
 		uint16_t agg_id;
 		uint16_t active_agg_id;
+		/* standby, and since when it looked like it (zebra_mbfd.c) */
+		bool standby;
+		struct timeval standby_since;
 	} mbfd;
 
 	/* ethernet segment */
