@@ -1803,6 +1803,22 @@ static void lag_member_evaluate(struct bfd_lag_member *m)
 	}
 
 	/*
+	 * Settling, it distributed but no longer does while its link stays up
+	 * (LACP still converging): the sessions get BFD_LAG_SETTLE_UP afresh
+	 * once it does again, within BFD_LAG_SETTLE_MAX of the release. Losing
+	 * the link instead (the peer holds its end down) keeps the window.
+	 */
+	if (m->settling && m->settle_dist && !lag_member_eligible(m) &&
+	    CHECK_FLAG(m->zflags, ZAPI_LAG_MBR_F_OPER_UP)) {
+		int64_t since = monotime_since(&m->last_action, NULL) / 1000;
+
+		m->settle_dist = false;
+		event_cancel(&m->t_settle);
+		event_add_timer_msec(master, lag_settle_cb, m, MAX(BFD_LAG_SETTLE_MAX - since, 0),
+				     &m->t_settle);
+	}
+
+	/*
 	 * The sessions that decide: running, not shut down, and whose peer
 	 * doesn't signal AdminDown. All of them must be Up (A1).
 	 */
