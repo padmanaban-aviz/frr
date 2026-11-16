@@ -615,11 +615,22 @@ static void mbfd_member_kernel_change(struct interface *ifp)
 
 	if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DEFERRED)) {
 		/*
-		 * Held without setting it down: set down now (by the operator,
-		 * or the driver finished): it stays as it is. Running again:
-		 * hold it down now, it is ours to set up at the release.
+		 * Held without setting it down. Set down now (the operator's
+		 * "ip link set down" completed): it is the operator's, micro-BFD
+		 * lets go of it, so that the operator's "up" later brings it
+		 * back like any member (sessions, enable-grace) instead of
+		 * being taken for a port to hold down. Running again while
+		 * still admin up (the link came back): hold it down now, it is
+		 * ours to set up at the release.
 		 */
-		if (!up || !CHECK_FLAG(ifp->flags, IFF_RUNNING) || !mbfd_admin_up(ifp))
+		if (!up || !mbfd_admin_up(ifp)) {
+			zlog_info("micro-BFD: %s set down while held without link: the operator's, no longer held",
+				  ifp->name);
+			mbfd_member_clear(zif);
+			mbfd_state_write();
+			return;
+		}
+		if (!CHECK_FLAG(ifp->flags, IFF_RUNNING))
 			return;
 		zlog_info("micro-BFD: %s has link again, holding it down", ifp->name);
 		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DEFERRED);
