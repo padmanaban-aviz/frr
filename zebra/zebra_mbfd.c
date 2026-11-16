@@ -114,15 +114,20 @@ static void mbfd_ad_poll_schedule(void);
  * has read the netlink event; setting it up after the release would then
  * undo the operator's "down".
  */
-static bool mbfd_admin_up(const struct interface *ifp)
+static uint64_t mbfd_kernel_flags(const struct interface *ifp)
 {
 	struct ifreq ifr = {};
 
 	strlcpy(ifr.ifr_name, ifp->name, sizeof(ifr.ifr_name));
 	if (vrf_if_ioctl(SIOCGIFFLAGS, (caddr_t)&ifr, ifp->vrf->vrf_id) < 0)
-		return CHECK_FLAG(ifp->flags, IFF_UP);
+		return ifp->flags;
 
-	return CHECK_FLAG(ifr.ifr_flags, IFF_UP);
+	return (unsigned short)ifr.ifr_flags;
+}
+
+static bool mbfd_admin_up(const struct interface *ifp)
+{
+	return CHECK_FLAG(mbfd_kernel_flags(ifp), IFF_UP);
 }
 
 static uint32_t mbfd_enslave_flags(const struct interface *ifp)
@@ -559,7 +564,8 @@ static void mbfd_guard_cb(struct event *t)
 	struct zebra_if *zif = ifp->info;
 
 	if (!CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED) ||
-	    CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH) || !mbfd_admin_up(ifp))
+	    CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH | ZEBRA_MBFD_F_DEFERRED) ||
+	    !mbfd_admin_up(ifp))
 		return;
 
 	zlog_info("micro-BFD: %s set up by someone else while held down, setting it down again",
@@ -604,6 +610,23 @@ static void mbfd_member_kernel_change(struct interface *ifp)
 			mbfd_member_clear(zif);
 			mbfd_state_write();
 		}
+		return;
+	}
+
+	if (CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DEFERRED)) {
+		/*
+		 * Held without setting it down: set down now (by the operator,
+		 * or the driver finished): it stays as it is. Running again:
+		 * hold it down now, it is ours to set up at the release.
+		 */
+		if (!up || !CHECK_FLAG(ifp->flags, IFF_RUNNING) || !mbfd_admin_up(ifp))
+			return;
+		zlog_info("micro-BFD: %s has link again, holding it down", ifp->name);
+		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DEFERRED);
+		SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP | ZEBRA_MBFD_F_PEND_DETACH);
+		if (dplane_intf_set_admin(ifp, false) == ZEBRA_DPLANE_REQUEST_FAILURE)
+			mbfd_member_clear(zif);
+		mbfd_state_write();
 		return;
 	}
 
@@ -983,6 +1006,7 @@ void zebra_mbfd_dist_set(struct zserv *client, struct zmsghdr *hdr, struct strea
 	struct zebra_if *zif;
 	struct mbfd_reg *reg;
 	uint8_t mode, count;
+	uint64_t kflags;
 
 	if (zapi_lag_dist_decode(msg, &dist) < 0 || !zns) {
 		zlog_warn("micro-BFD: malformed %s from %s", zserv_command_string(hdr->command),
@@ -1026,11 +1050,26 @@ void zebra_mbfd_dist_set(struct zserv *client, struct zmsghdr *hdr, struct strea
 		zif->mbfd.guard_backoff = 0;
 		zif->mbfd.home_bond = dist.bond_ifindex;
 		UNSET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_PEND_ATTACH | ZEBRA_MBFD_F_EXT_REENSLAVED |
-						    ZEBRA_MBFD_F_WAS_UP);
+						    ZEBRA_MBFD_F_WAS_UP | ZEBRA_MBFD_F_DEFERRED);
 		SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DETACHED);
 
 		/* Already down (the operator's): nothing to do, nothing to undo. */
-		if (mbfd_admin_up(ifp)) {
+		kflags = mbfd_kernel_flags(ifp);
+		if (CHECK_FLAG(kflags, IFF_UP) && !CHECK_FLAG(kflags, IFF_RUNNING)) {
+			/*
+			 * Up but not running: no carrier, or being set down
+			 * right now ("ip link set down" keeps IFF_UP until the
+			 * driver has stopped, which takes a while on some NICs,
+			 * and the sessions fail meanwhile). Setting it down and
+			 * up again at the release would undo an operator's
+			 * down: leave its admin state alone until it runs again
+			 * (mbfd_member_kernel_change()).
+			 */
+			SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DEFERRED);
+			zlog_info("micro-BFD: %s has no link, holding it without setting it down",
+				  ifp->name);
+		} else if (CHECK_FLAG(kflags, IFF_UP)) {
+			/* Set it down; it is ours to set up at the release. */
 			SET_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_WAS_UP | ZEBRA_MBFD_F_PEND_DETACH);
 			if (dplane_intf_set_admin(ifp, false) == ZEBRA_DPLANE_REQUEST_FAILURE)
 				mbfd_member_clear(zif);
@@ -1308,6 +1347,8 @@ void zebra_mbfd_if_show(struct vty *vty, json_object *json_if, struct interface 
 							   ZEBRA_MBFD_F_PEND_ATTACH));
 		json_object_boolean_add(jo, "setUpExternally",
 					CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED));
+		json_object_boolean_add(jo, "noLinkDeferred",
+					CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DEFERRED));
 		json_object_string_add(jo, "reportedFlags",
 				       zif->mbfd.notified_bond
 					       ? zapi_lag_mbr_flags2str(zif->mbfd.last_flags, buf,
@@ -1326,6 +1367,8 @@ void zebra_mbfd_if_show(struct vty *vty, json_object *json_if, struct interface 
 				: "",
 			CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_EXT_REENSLAVED)
 				? ", set up externally"
+			: CHECK_FLAG(zif->mbfd.flags, ZEBRA_MBFD_F_DEFERRED)
+				? ", no link (admin state left alone)"
 				: "",
 			zif->mbfd.notified_bond
 				? zapi_lag_mbr_flags2str(zif->mbfd.last_flags, buf, sizeof(buf))

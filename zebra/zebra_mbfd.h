@@ -27,6 +27,7 @@ struct vty;
 #define ZEBRA_MBFD_F_PEND_ATTACH    0x04 /* admin up requested, not seen yet */
 #define ZEBRA_MBFD_F_EXT_REENSLAVED 0x08 /* set up by someone else while held down */
 #define ZEBRA_MBFD_F_WAS_UP	    0x10 /* admin up when held down: zebra set it down */
+#define ZEBRA_MBFD_F_DEFERRED	    0x20 /* held, not set down yet: no link (see dist_set) */
 
 /* Guard against a member held down being set up by someone else, seconds. */
 #define ZEBRA_MBFD_GUARD_MIN 1
