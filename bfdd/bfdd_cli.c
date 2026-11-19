@@ -1891,6 +1891,7 @@ bfdd_cli_init(void)
 
 	/* RFC 7130 micro-BFD. */
 	install_node(&bfd_lag_node);
+	install_default(BFD_LAG_NODE);
 	install_element(BFD_NODE, &bfd_lag_enter_cmd);
 	install_element(BFD_NODE, &no_bfd_lag_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_ipv4_cmd);
