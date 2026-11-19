@@ -25,7 +25,9 @@
  * so a bad configuration is reported before it matters.
  *
  * The check runs on events (session up, down or renegotiated, configuration),
- * coalesced into one pass over all sessions; it has no timer of its own.
+ * coalesced into one pass over all sessions BFD_BLB_CHECK_DELAY after the
+ * first: a poll sequence moves the detection time through intermediate
+ * values that would each be warned about otherwise.
  *
  * Copyright (C) 2026 Aviz Networks
  */
@@ -254,7 +256,8 @@ void bfd_blb_changed(void)
 	if (bglobal.bg_shutdown)
 		return;
 
-	event_add_event(master, blb_check_cb, NULL, 0, &t_blb_check);
+	/* Already pending: this event is covered by it. */
+	event_add_timer_msec(master, blb_check_cb, NULL, BFD_BLB_CHECK_DELAY, &t_blb_check);
 }
 
 void bfd_blb_session_changed(const struct bfd_session *bs)

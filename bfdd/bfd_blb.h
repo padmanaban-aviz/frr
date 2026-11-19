@@ -41,6 +41,12 @@ enum bfd_blb_mode {
  */
 #define BFD_BLB_MARGIN_MS 100
 
+/*
+ * Events are checked together this long after the first one (ms), so the
+ * intermediate detection times of a poll sequence aren't each warned about.
+ */
+#define BFD_BLB_CHECK_DELAY 1000
+
 /* Per-session state (struct bfd_session::blb). */
 struct bfd_blb_state {
 	bool too_fast;	    /* the rule is broken (last check) */
