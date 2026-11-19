@@ -1077,6 +1077,88 @@ one):
    and released, and the bond and member state ``zebra`` reports.
 
 
+.. _bfd-blb-coexistence:
+
+BFD over the bond together with micro-BFD
+-----------------------------------------
+
+A BFD session on the bond itself (BFD over the logical bundle, BLB), for
+example one BGP asks for with ``neighbor 10.0.40.2 bfd``, is an ordinary
+single-hop session on UDP port 3784. The kernel hashes its packets onto one
+member. If that member fails silently, BLB loses its packets although the
+other members work, and BGP goes down for a failure the bond survives.
+Micro-BFD holds the failed member down so the bond moves BLB's packets to
+another member, but this only helps if it happens before BLB's own
+detection time runs out.
+
+.. clicmd:: bundle coexistence bob-blb logical
+
+   Under ``bfd``: check every BLB session of a bond that has a ``lag``
+   configuration (a single-hop session whose interface is the bond, in the
+   bond's VRF) against the rule
+
+   ``BLB detection time >= 2 x micro-BFD detection time + 100 ms``
+
+   and warn in the log, in ``show bfd lag`` and in ``show bfd peers`` (text
+   and JSON) when it isn't met. The BLB session itself runs and is reported
+   to its clients unchanged; nothing is refused and no timer is changed.
+   The command name and meaning follow IOS XR's ``bfd bundle coexistence
+   bob-blb logical``; configure both ends the same way.
+
+   The micro-BFD detection time is the largest negotiated one over the
+   bond's Up micro-BFD sessions, or the configured one while none is Up.
+   The BLB detection time is the negotiated one while the session is Up
+   (the echo detection time, if echo runs and it is shorter), and the
+   configured multiplier times receive interval while it is down, so a
+   configuration that is too fast is reported before it matters.
+
+   The margin covers the worst case for BLB riding on a silently failed
+   member: micro-BFD detection, the hold and the bond's rehash (10 to 30
+   ms), one BLB interval until its next packet takes a good member, and
+   timing differences between the peers. For example:
+
+   ===============  ===============  ===============  =================
+   micro-BFD        micro detection  BLB minimum      example BLB
+   ===============  ===============  ===============  =================
+   50 ms x 3        150 ms           400 ms           150 ms x 3
+   100 ms x 3       300 ms           700 ms           250 ms x 3
+   300 ms x 3       900 ms           1900 ms          700 ms x 3
+   ===============  ===============  ===============  =================
+
+   Without the command, BLB sessions are not checked. Coexistence in
+   inherit mode (BLB state taken from the micro-BFD sessions, no BLB
+   packets) is not supported.
+
+   ::
+
+      bfd
+       bundle coexistence bob-blb logical
+       profile lag
+        receive-interval 100
+        transmit-interval 100
+       !
+       lag bond0
+        ipv4 dest-addr 10.0.40.2
+        profile lag
+       exit
+      !
+      router bgp 65001
+       neighbor 10.0.40.2 remote-as 65002
+       neighbor 10.0.40.2 bfd
+       neighbor 10.0.40.2 bfd profile blb
+      !
+
+   ``show bfd lag`` then adds::
+
+      BLB coexistence: logical, micro-BFD detection 300 ms, BLB needs at least 700 ms
+        10.0.40.2: up, detection 900 ms, ok
+
+   JSON: ``blbMode``, ``blbMicroDetectionTime``, ``blbRequiredDetectionTime``
+   and ``blbSessions`` in ``show bfd lag json``; a ``blb`` object (``lag``,
+   ``mode``, ``detectionTime``, ``requiredDetectionTime``, ``ok``) on the
+   session in ``show bfd peers json``.
+
+
 .. _bfd-distributed:
 
 Distributed BFD
