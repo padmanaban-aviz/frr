@@ -1275,6 +1275,19 @@ void bfd_recv_cb(struct event *t)
 		return;
 	}
 
+	/*
+	 * RFC 7130 micro-BFD packets arrive only on the member raw sockets
+	 * (UDP 6784), where bfd_lag.c checks the member and addresses. One on
+	 * these sockets naming a micro-BFD session's discriminator is not
+	 * for it.
+	 */
+	if (bfd->bfd_mode == BFD_MODE_TYPE_MICRO_BFD) {
+		bfd->stats.rx_bad_ctrl_pkt++;
+		cp_debug(is_mhop, &peer, &local, ifindex, vrfid,
+			 "Your Discriminator names a micro-BFD session: dropped");
+		return;
+	}
+
 	rx.sd = sd;
 	rx.is_mhop = is_mhop;
 	rx.ttl = ttl;
