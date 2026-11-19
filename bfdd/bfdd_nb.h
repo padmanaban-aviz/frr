@@ -14,6 +14,8 @@ extern const struct frr_yang_module_info frr_bfdd_info;
 /* Mandatory callbacks. */
 int bfdd_bfd_create(struct nb_cb_create_args *args);
 int bfdd_bfd_destroy(struct nb_cb_destroy_args *args);
+int bfdd_bfd_bundle_coexistence_modify(struct nb_cb_modify_args *args);
+int bfdd_bfd_bundle_coexistence_destroy(struct nb_cb_destroy_args *args);
 int bfdd_bfd_profile_create(struct nb_cb_create_args *args);
 int bfdd_bfd_profile_destroy(struct nb_cb_destroy_args *args);
 int bfdd_bfd_profile_detection_multiplier_modify(
@@ -217,6 +219,8 @@ bfdd_bfd_sessions_multi_hop_stats_echo_packet_output_count_get_elem(
 void bfd_cli_show_header(struct vty *vty, const struct lyd_node *dnode,
 			 bool show_defaults);
 void bfd_cli_show_header_end(struct vty *vty, const struct lyd_node *dnode);
+void bfd_cli_show_bundle_coexistence(struct vty *vty, const struct lyd_node *dnode,
+				     bool show_defaults);
 void bfd_cli_show_single_hop_peer(struct vty *vty, const struct lyd_node *dnode,
 				  bool show_defaults);
 void bfd_cli_show_multi_hop_peer(struct vty *vty, const struct lyd_node *dnode,

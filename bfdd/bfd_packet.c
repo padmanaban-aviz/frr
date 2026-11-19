@@ -1318,6 +1318,7 @@ void bfd_ctrl_pkt_process(struct bfd_session *bfd, struct bfd_pkt *cp, ssize_t m
 	struct interface *ifp = rx->ifp;
 	struct sockaddr_any local = rx->local;
 	struct sockaddr_any peer = rx->peer;
+	uint64_t old_detect_TO;
 
 	/* Validate single hop packet TTL. */
 	if ((!is_mhop) && (ttl != BFD_TTL_VAL)) {
@@ -1539,9 +1540,13 @@ void bfd_ctrl_pkt_process(struct bfd_session *bfd, struct bfd_pkt *cp, ssize_t m
 	 *
 	 * RFC 5880, Section 6.8.4.
 	 */
+	old_detect_TO = bfd->detect_TO;
 	bfd->detect_TO = bfd_detection_timeout_us(bfd->remote_detect_mult,
 						  bfd->cur_timers.required_min_rx,
 						  bfd->remote_timers.desired_min_tx);
+	/* Renegotiated: re-check the BLB timer rule. */
+	if (bfd->detect_TO != old_detect_TO)
+		bfd_blb_session_changed(bfd);
 
 	/*
 	 * Apply new receive timer immediately, unless demand mode is

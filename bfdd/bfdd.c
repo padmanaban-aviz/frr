@@ -75,6 +75,7 @@ static FRR_NORETURN void sigterm_handler(void)
 
 	/* Zebra re-attaches the LAG members micro-BFD took out. */
 	bfd_lag_terminate();
+	bfd_blb_terminate();
 
 	keychain_terminate();
 
@@ -328,6 +329,7 @@ int main(int argc, char *argv[])
 	/* Initialize BFD data structures. */
 	bfd_initialize();
 	bfd_lag_init();
+	bfd_blb_init();
 
 	bfd_vrf_init(perm_vrfs);
 

@@ -11,6 +11,7 @@ endif
 
 bfdd_libbfd_a_SOURCES = \
 	bfdd/bfd.c \
+	bfdd/bfd_blb.c \
 	bfdd/bfdd_nb.c \
 	bfdd/bfdd_nb_config.c \
 	bfdd/bfdd_nb_lag.c \
@@ -41,6 +42,7 @@ clippy_scan += \
 noinst_HEADERS += \
 	bfdd/bfdd_nb.h \
 	bfdd/bfd.h \
+	bfdd/bfd_blb.h \
 	bfdd/bfd_frame.h \
 	bfdd/bfd_lag.h \
 	bfdd/bfd_timer.h \

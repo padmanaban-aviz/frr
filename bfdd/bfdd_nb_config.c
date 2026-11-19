@@ -445,6 +445,7 @@ int bfdd_bfd_destroy(struct nb_cb_destroy_args *args)
 		bfd_sessions_remove_manual();
 		bfd_lag_free_all();
 		bfd_profiles_remove();
+		bfd_blb_set_mode(BFD_BLB_MODE_NONE);
 		break;
 
 	case NB_EV_ABORT:
@@ -452,6 +453,27 @@ int bfdd_bfd_destroy(struct nb_cb_destroy_args *args)
 		return NB_OK;
 	}
 
+	return NB_OK;
+}
+
+/*
+ * XPath: /frr-bfdd:bfdd/bfd/bundle-coexistence
+ */
+int bfdd_bfd_bundle_coexistence_modify(struct nb_cb_modify_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	bfd_blb_set_mode(yang_dnode_get_enum(args->dnode, NULL));
+	return NB_OK;
+}
+
+int bfdd_bfd_bundle_coexistence_destroy(struct nb_cb_destroy_args *args)
+{
+	if (args->event != NB_EV_APPLY)
+		return NB_OK;
+
+	bfd_blb_set_mode(BFD_BLB_MODE_NONE);
 	return NB_OK;
 }
 

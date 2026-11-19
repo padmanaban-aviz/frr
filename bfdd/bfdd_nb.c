@@ -27,6 +27,14 @@ const struct frr_yang_module_info frr_bfdd_info = {
 			}
 		},
 		{
+			.xpath = "/frr-bfdd:bfdd/bfd/bundle-coexistence",
+			.cbs = {
+				.modify = bfdd_bfd_bundle_coexistence_modify,
+				.destroy = bfdd_bfd_bundle_coexistence_destroy,
+				.cli_show = bfd_cli_show_bundle_coexistence,
+			}
+		},
+		{
                         .xpath = "/frr-bfdd:bfdd/bfd/profile",
                         .cbs = {
                                 .create = bfdd_bfd_profile_create,

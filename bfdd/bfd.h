@@ -23,6 +23,7 @@
 #include "lib/keychain.h"
 #include "lib/bfd.h"
 #include "bfdd/bfd_timer.h"
+#include "bfdd/bfd_blb.h"
 
 #ifdef BFD_DEBUG
 #define BFDD_JSON_CONV_OPTIONS (JSON_C_TO_STRING_PRETTY)
@@ -469,6 +470,9 @@ struct bfd_session {
 
 	/* RFC 7130 micro-BFD: the LAG member this session runs on. */
 	struct bfd_lag_member *lag_mbr;
+
+	/* BFD over the bond (BLB) timer rule state (bfd_blb.c). */
+	struct bfd_blb_state blb;
 };
 
 struct bfd_diag_str_list {

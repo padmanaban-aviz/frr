@@ -52,6 +52,12 @@ module frr-bfdd {
      (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
      OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
 
+  revision 2026-11-19 {
+    description
+      "Add bundle-coexistence: BFD over the bond (BLB) together with
+       RFC 7130 micro-BFD, logical mode.";
+  }
+
   revision 2026-11-10 {
     description
       "Add RFC 7130 micro-BFD on LAG (bond) members, IPv4 and IPv6,
@@ -485,6 +491,27 @@ module frr-bfdd {
 
     container bfd {
       presence "Present if the BFD protocol is enabled";
+
+      leaf bundle-coexistence {
+        type enumeration {
+          enum logical {
+            value 1;
+            description
+              "A BFD session on a bond that runs RFC 7130 micro-BFD
+               (BFD over the logical bundle, BLB) runs as its own
+               session and is reported unchanged. bfdd checks that
+               its detection time is at least twice the micro-BFD
+               detection time plus 100 ms, so that micro-BFD takes a
+               silently failed member out before BLB expires, and
+               warns when it isn't.";
+          }
+        }
+        description
+          "How BFD sessions on a bond live with the bond's micro-BFD
+           sessions (as IOS XR 'bfd bundle coexistence bob-blb').
+           Absent: BLB sessions run as plain sessions. Both ends
+           should use the same setting (FRR extension).";
+      }
 
       list profile {
         key "name";

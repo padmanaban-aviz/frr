@@ -246,6 +246,7 @@ struct bfd_lag {
 	enum bfd_lag_fail_mode fail_mode;
 	uint32_t admin_down_hold; /* ms, 0: as long as AdminDown lasts */
 	bool fail_mode_warned;	  /* "open on a balance-xor bond" logged */
+	bool blb_no_micro_warned; /* BLB coexistence: "no micro-BFD sessions" logged */
 
 	/* Bond, once it exists. */
 	ifindex_t ifindex;
@@ -323,6 +324,7 @@ void bfd_lag_show_statistics(struct vty *vty, bool use_json);
 void bfd_lag_vrf_disable(struct bfd_vrf_global *bvrf);
 
 const char *bfd_lag_mode2str(enum bfd_lag_mode mode);
+const char *bfd_lag_vrf_name(const struct bfd_lag *lag);
 const char *bfd_lag_fail_mode2str(enum bfd_lag_fail_mode mode);
 
 #ifdef __cplusplus

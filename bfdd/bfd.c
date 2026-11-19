@@ -301,6 +301,9 @@ void bfd_session_apply(struct bfd_session *bs)
 
 	/* Send updated information to data plane. */
 	bfd_dplane_update_session(bs);
+
+	/* Configured timers count while a BLB session is down. */
+	bfd_blb_session_changed(bs);
 }
 
 static void bfd_profile_remove_reference(struct bfd_session *bs)
@@ -814,6 +817,7 @@ void ptm_bfd_sess_up(struct bfd_session *bfd)
 	ptm_bfd_snd(bfd, 0);
 
 	ptm_bfd_notify(bfd, bfd->ses_state);
+	bfd_blb_session_changed(bfd);
 
 	frrtrace(4, frr_bfd, state_change, bfd, old_state, bfd->ses_state, bfd->local_diag);
 
@@ -862,6 +866,7 @@ void ptm_bfd_sess_dn(struct bfd_session *bfd, uint8_t diag, bool notify_admin_do
 
 	/* Slow down the control packets, the connection is down. */
 	bs_set_slow_timers(bfd);
+	bfd_blb_session_changed(bfd);
 
 	/* only signal clients when going from up->down state */
 	if (old_state == PTM_BFD_UP) {
@@ -1279,6 +1284,9 @@ void bfd_session_free(struct bfd_session *bs)
 	/* Unlink a micro-BFD session from its LAG member first. */
 	if (bs->lag_mbr)
 		bfd_lag_session_freed(bs);
+
+	/* Re-check BLB timers without it (the check runs later). */
+	bfd_blb_session_changed(bs);
 
 	bfd_session_disable(bs);
 

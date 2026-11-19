@@ -1427,6 +1427,42 @@ void bfd_cli_peer_profile_show(struct vty *vty, const struct lyd_node *dnode,
 
 
 /*
+ * BFD over the bond (BLB) together with micro-BFD.
+ */
+#define BUNDLE_STR	"Bundle (LAG) settings\n"
+#define COEXIST_STR	"BFD sessions on a bond that runs micro-BFD\n"
+#define BOB_BLB_STR	"BFD over bundle members (micro-BFD) and over the logical bundle (BLB)\n"
+
+DEFPY_YANG(bfd_bundle_coexistence, bfd_bundle_coexistence_cmd,
+	"bundle coexistence bob-blb logical$mode",
+	BUNDLE_STR
+	COEXIST_STR
+	BOB_BLB_STR
+	"BLB runs as its own session; warn when its timers are too fast for micro-BFD\n")
+{
+	nb_cli_enqueue_change(vty, "/frr-bfdd:bfdd/bfd/bundle-coexistence", NB_OP_MODIFY, mode);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY_YANG(no_bfd_bundle_coexistence, no_bfd_bundle_coexistence_cmd,
+	"no bundle coexistence bob-blb [logical]",
+	NO_STR
+	BUNDLE_STR
+	COEXIST_STR
+	BOB_BLB_STR
+	"BLB runs as its own session; warn when its timers are too fast for micro-BFD\n")
+{
+	nb_cli_enqueue_change(vty, "/frr-bfdd:bfdd/bfd/bundle-coexistence", NB_OP_DESTROY, NULL);
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+void bfd_cli_show_bundle_coexistence(struct vty *vty, const struct lyd_node *dnode,
+				     bool show_defaults __attribute__((__unused__)))
+{
+	vty_out(vty, " bundle coexistence bob-blb %s\n", yang_dnode_get_string(dnode, NULL));
+}
+
+/*
  * RFC 7130 micro-BFD commands.
  */
 #define LAG_STR	   "RFC 7130 micro-BFD on a LAG (bond) interface\n"
@@ -1892,6 +1928,8 @@ bfdd_cli_init(void)
 	/* RFC 7130 micro-BFD. */
 	install_node(&bfd_lag_node);
 	install_default(BFD_LAG_NODE);
+	install_element(BFD_NODE, &bfd_bundle_coexistence_cmd);
+	install_element(BFD_NODE, &no_bfd_bundle_coexistence_cmd);
 	install_element(BFD_NODE, &bfd_lag_enter_cmd);
 	install_element(BFD_NODE, &no_bfd_lag_cmd);
 	install_element(BFD_LAG_NODE, &bfd_lag_ipv4_cmd);

@@ -241,6 +241,7 @@ static void _display_peer(struct vty *vty, struct bfd_session *bs)
 	}
 	if (bs->profile_name)
 		vty_out(vty, "\t\tProfile: %s\n", bs->profile_name);
+	bfd_blb_show_peer(vty, bs, NULL);
 
 	vty_out(vty, "\t\tLocal timers:\n");
 	vty_out(vty, "\t\t\tDetect-multiplier: %u\n",
@@ -337,6 +338,9 @@ static struct json_object *__display_peer_json(struct bfd_session *bs)
 	struct json_object *auth_jo = json_object_new_object();
 	struct key *key = NULL;
 	enum bfd_auth_type auth_type;
+
+	/* BFD over the bond (BLB) timer rule, if the bond runs micro-BFD. */
+	bfd_blb_show_peer(NULL, bs, jo);
 
 	if (bs->key.ifname[0])
 		json_object_string_add(jo, "interface", bs->key.ifname);

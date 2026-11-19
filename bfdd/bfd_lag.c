@@ -256,6 +256,11 @@ static const char *lag_vrf_name(const struct bfd_lag *lag)
 	return vrf ? vrf->name : VRF_DEFAULT_NAME;
 }
 
+const char *bfd_lag_vrf_name(const struct bfd_lag *lag)
+{
+	return lag_vrf_name(lag);
+}
+
 /*
  * The bond's source address for a family: IPv4, the primary (non
  * secondary) address; IPv6, the first global unicast address (RFC 7130,
@@ -2319,6 +2324,10 @@ void bfd_lag_free(struct bfd_lag *lag)
 	bfd_lag_members_fini(&lag->members);
 	bfd_lags_del(&bfd_lags, lag);
 	XFREE(MTYPE_BFDD_LAG, lag);
+
+	/* BLB sessions on the bond are no longer checked. */
+	if (bfd_blb_get_mode() != BFD_BLB_MODE_NONE)
+		bfd_blb_changed();
 }
 
 void bfd_lag_free_all(void)
@@ -2517,6 +2526,8 @@ void bfd_lag_apply(struct bfd_lag *lag)
 	}
 	lag_resolve(lag);
 	lag_sessions_sync(lag);
+	if (bfd_blb_get_mode() != BFD_BLB_MODE_NONE)
+		bfd_blb_changed();
 }
 
 void bfd_lag_init(void)
@@ -2824,6 +2835,7 @@ static void lag_show_one(struct vty *vty, struct bfd_lag *lag, json_object *json
 		if (lag_fail_mode_risky(lag))
 			json_object_string_add(jl, "failureModeWarning",
 					       "failure-mode open on a balance-xor bond");
+		bfd_blb_show_lag(vty, lag, jl);
 		frr_each (bfd_lag_members, &lag->members, m) {
 			json_object *jm = json_object_new_object();
 
@@ -2877,6 +2889,7 @@ static void lag_show_one(struct vty *vty, struct bfd_lag *lag, json_object *json
 		vty_out(vty,
 			"  warning: detection time %u ms is below %u ms; software BFD may see false failures\n",
 			detect, BFD_LAG_MIN_DETECT_WARN);
+	bfd_blb_show_lag(vty, lag, NULL);
 	frr_each (bfd_lag_members, &lag->members, m)
 		lag_member_show(vty, m, NULL);
 	vty_out(vty, "\n");
