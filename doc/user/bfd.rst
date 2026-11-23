@@ -1091,9 +1091,13 @@ Micro-BFD holds the failed member down so the bond moves BLB's packets to
 another member, but this only helps if it happens before BLB's own
 detection time runs out.
 
-.. clicmd:: bundle coexistence bob-blb logical
+.. clicmd:: bundle coexistence bob-blb <logical|inherit>
 
-   Under ``bfd``: check every BLB session of a bond that has a ``lag``
+   Under ``bfd``, one setting for every bond that has a ``lag``
+   configuration. The command name and meaning follow IOS XR's ``bfd bundle
+   coexistence bob-blb``; configure both ends the same way.
+
+   ``logical``: check every BLB session of a bond that has a ``lag``
    configuration (a single-hop session whose interface is the bond, in the
    bond's VRF) against the rule
 
@@ -1103,8 +1107,6 @@ detection time runs out.
    time + 500 ms``) and warn in the log, in ``show bfd lag`` and in ``show bfd peers`` (text
    and JSON) when it isn't met. The BLB session itself runs and is reported
    to its clients unchanged; nothing is refused and no timer is changed.
-   The command name and meaning follow IOS XR's ``bfd bundle coexistence
-   bob-blb logical``; configure both ends the same way.
 
    The micro-BFD detection time is the largest negotiated one over the
    bond's Up micro-BFD sessions, or the configured one while none is Up.
@@ -1131,9 +1133,41 @@ detection time runs out.
    300 ms x 3       900 ms           1400 ms                  700 ms x 3
    ===============  ===============  =======================  ================
 
-   Without the command, BLB sessions are not checked. Coexistence in
-   inherit mode (BLB state taken from the micro-BFD sessions, no BLB
-   packets) is not supported.
+   ``inherit``: every BLB session of a bond with a ``lag`` configuration
+   becomes a virtual session. It keeps its configuration and discriminator,
+   so its clients register, see and show it as before, but it sends no
+   control packets on UDP 3784 and runs no timers. Its state follows the
+   bond's micro-BFD sessions of its address family (an IPv6 session, global
+   or link-local, follows IPv6; when micro-BFD runs in one family only,
+   every BLB session follows that one):
+
+   - Up while at least the bond's ``min_links`` members (at least one) are
+     in the bond, distributing or standby, with their micro-BFD session Up;
+   - Down, with diagnostic concatenated path down, otherwise, including
+     while the bond comes up and after a restart of bfdd;
+   - AdminDown when the session is shut down locally.
+
+   A failed member is then handled by micro-BFD alone (held down, the bond
+   rehashes) and never reaches the clients, whatever the BLB timers; a
+   failure that leaves fewer than ``min_links`` members is reported at
+   micro-BFD speed. Set the threshold on the bond, for example ``ip link set
+   bond0 type bond min_links 2``. Inherit mode verifies each link and the
+   peer's bond addresses that micro-BFD runs between, not another BLB peer
+   address.
+
+   Both ends must run inherit. It does not interoperate with a peer running
+   a plain BLB session: that peer sends and expects packets on UDP 3784. A
+   control packet on UDP 3784 for a virtual session is counted and not
+   answered, logged once, and shown as a peer mismatch until 10 seconds
+   after the last one; the session's state still follows micro-BFD.
+
+   Changing the mode at run time is allowed and logs a warning that the
+   peer must change too. A session turned from virtual back into a real one
+   starts Down and needs the three-way handshake before its clients see it
+   Up again.
+
+   Without the command, BLB sessions are plain sessions and are not
+   checked.
 
    ::
 
@@ -1159,12 +1193,26 @@ detection time runs out.
       BLB coexistence: logical, micro-BFD detection 300 ms, rehash allowance 500 ms
         10.0.40.2: up, detection 1200 ms, needs 1200 ms, ok
 
-   JSON: ``blbMode``, ``blbMicroDetectionTime``, ``blbRehashAllowance`` and
+   In inherit mode ``show bfd lag`` adds the aggregate and the sessions::
+
+      BLB coexistence: inherit, min_links 1, IPv4 up (2 of 2 members)
+        10.0.40.2: up, inherited (virtual, no packets), follows IPv4
+
+   and ``show bfd peers``::
+
+      BLB: inherited from lag bond0 (virtual, no packets, IPv4 2 of 2 members Up, min_links 1)
+
+   JSON in logical mode: ``blbMode``, ``blbMicroDetectionTime``, ``blbRehashAllowance`` and
    ``blbSessions`` (per session ``state``, ``detectionTime``, ``interval``,
    ``requiredDetectionTime``, ``ok``) in ``show bfd lag json``; a ``blb``
    object (``lag``, ``mode``, ``detectionTime``, ``interval``,
    ``requiredDetectionTime``, ``ok``) on the session in ``show bfd peers
-   json``.
+   json``. In inherit mode: ``blbMode``, ``minLinks``, ``blbAggregate``
+   (per family ``state``, ``membersUp``, ``members``) and ``blbSessions``
+   (per session ``state``, ``virtual``, ``follows``, ``peerMismatch``,
+   ``mismatchPackets``) in ``show bfd lag json``; a ``blb`` object (``lag``,
+   ``mode``, ``virtual``, ``follows``, ``membersUp``, ``minLinks``,
+   ``peerMismatch``, ``mismatchPackets``) in ``show bfd peers json``.
 
 
 .. _bfd-distributed:
