@@ -243,6 +243,8 @@ struct dplane_intf_info {
 	uint8_t ad_actor_state;
 	bool bond_mode_valid;
 	uint8_t bond_mode;
+	bool bond_min_links_valid;
+	uint32_t bond_min_links;
 	enum zebra_link_type zltype;
 	uint8_t family;
 	struct zebra_vxlan_vni_array *vniarray;
@@ -1734,6 +1736,24 @@ bool dplane_ctx_get_ifp_bond_mode(const struct zebra_dplane_ctx *ctx, uint8_t *m
 		*mode = ctx->u.intf.bond_mode;
 
 	return ctx->u.intf.bond_mode_valid;
+}
+
+void dplane_ctx_set_ifp_bond_min_links(struct zebra_dplane_ctx *ctx, bool valid, uint32_t min_links)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	ctx->u.intf.bond_min_links_valid = valid;
+	ctx->u.intf.bond_min_links = valid ? min_links : 0;
+}
+
+bool dplane_ctx_get_ifp_bond_min_links(const struct zebra_dplane_ctx *ctx, uint32_t *min_links)
+{
+	DPLANE_CTX_VALID(ctx);
+
+	if (min_links)
+		*min_links = ctx->u.intf.bond_min_links;
+
+	return ctx->u.intf.bond_min_links_valid;
 }
 
 bool dplane_ctx_get_ifp_ad_actor_state(const struct zebra_dplane_ctx *ctx, uint8_t *state)

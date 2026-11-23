@@ -2062,6 +2062,8 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 		uint8_t ad_actor_state;
 		bool bond_mode_valid;
 		uint8_t bond_mode;
+		bool bond_min_links_valid;
+		uint32_t bond_min_links;
 		uint64_t flags;
 		uint32_t mtu;
 		ns_id_t link_nsid;
@@ -2089,6 +2091,7 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 		bypass = dplane_ctx_get_ifp_bypass(ctx);
 		ad_actor_state_valid = dplane_ctx_get_ifp_ad_actor_state(ctx, &ad_actor_state);
 		bond_mode_valid = dplane_ctx_get_ifp_bond_mode(ctx, &bond_mode);
+		bond_min_links_valid = dplane_ctx_get_ifp_bond_min_links(ctx, &bond_min_links);
 		flags = dplane_ctx_get_ifp_flags(ctx);
 		mtu = dplane_ctx_get_ifp_mtu(ctx);
 		link_ifindex = dplane_ctx_get_ifp_link_ifindex(ctx);
@@ -2429,6 +2432,8 @@ static void zebra_if_dplane_ifp_handling(struct zebra_dplane_ctx *ctx)
 				zif->bond_info.mode_valid = true;
 				zif->bond_info.mode = bond_mode;
 			}
+			if (IS_ZEBRA_IF_BOND(ifp) && bond_min_links_valid)
+				zif->bond_info.min_links = bond_min_links;
 		}
 
 		/* micro-BFD: bond / member state may have changed. */

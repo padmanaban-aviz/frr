@@ -39,6 +39,9 @@ struct zebra_l2info_bond {
 	/* Kernel bond mode (IFLA_BOND_MODE), when the kernel reported it */
 	bool mode_valid;
 	uint8_t mode;
+
+	/* Kernel min_links (IFLA_BOND_MIN_LINKS), 0 when not reported */
+	uint32_t min_links;
 };
 
 struct zebra_l2_bridge_vlan {

@@ -464,6 +464,9 @@ bool dplane_ctx_get_ifp_ad_actor_state(const struct zebra_dplane_ctx *ctx, uint8
 /* Bond mode (IFLA_BOND_MODE), bond interfaces only */
 void dplane_ctx_set_ifp_bond_mode(struct zebra_dplane_ctx *ctx, bool valid, uint8_t mode);
 bool dplane_ctx_get_ifp_bond_mode(const struct zebra_dplane_ctx *ctx, uint8_t *mode);
+/* Bond min_links (IFLA_BOND_MIN_LINKS), when the kernel reported it. */
+void dplane_ctx_set_ifp_bond_min_links(struct zebra_dplane_ctx *ctx, bool valid, uint32_t min_links);
+bool dplane_ctx_get_ifp_bond_min_links(const struct zebra_dplane_ctx *ctx, uint32_t *min_links);
 void dplane_ctx_set_ifp_flags(struct zebra_dplane_ctx *ctx, uint64_t flags);
 uint64_t dplane_ctx_get_ifp_flags(const struct zebra_dplane_ctx *ctx);
 void dplane_ctx_set_ifp_change_flags(struct zebra_dplane_ctx *ctx, uint64_t change_flags);

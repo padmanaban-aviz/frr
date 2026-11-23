@@ -1409,6 +1409,8 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *ar
 	uint8_t bypass = 0;
 	bool bond_mode_valid = false;
 	uint8_t bond_mode = 0;
+	bool bond_min_links_valid = false;
+	uint32_t bond_min_links = 0;
 	bool ad_actor_state_valid = false;
 	uint8_t ad_actor_state = 0;
 	uint32_t txqlen = 0;
@@ -1500,6 +1502,11 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *ar
 				bond_mode = *(uint8_t *)RTA_DATA(bondinfo[IFLA_BOND_MODE]);
 				bond_mode_valid = true;
 			}
+			if (bondinfo[IFLA_BOND_MIN_LINKS]) {
+				bond_min_links =
+					*(uint32_t *)RTA_DATA(bondinfo[IFLA_BOND_MIN_LINKS]);
+				bond_min_links_valid = true;
+			}
 		}
 	}
 
@@ -1529,6 +1536,7 @@ int netlink_link_change(struct nlmsghdr *h, ns_id_t ns_id, int startup, void *ar
 	dplane_ctx_set_intf_txqlen(ctx, txqlen);
 	dplane_ctx_set_intf_carrier_changes(ctx, cchanges);
 	dplane_ctx_set_ifp_bond_mode(ctx, bond_mode_valid, bond_mode);
+	dplane_ctx_set_ifp_bond_min_links(ctx, bond_min_links_valid, bond_min_links);
 
 	/* We are interested in some AF_BRIDGE notifications. */
 #ifndef AF_BRIDGE

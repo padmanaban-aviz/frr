@@ -258,6 +258,7 @@ struct bfd_lag {
 	bool status_known;
 	uint8_t status;	   /* enum zapi_lag_bond_status_code */
 	uint8_t bond_mode; /* kernel bond mode */
+	uint16_t min_links; /* the bond's min_links, 0: not set */
 	struct event *t_stale;
 	struct event *t_addr;
 	struct event *t_warn; /* A3 warning, if a family still can't run */

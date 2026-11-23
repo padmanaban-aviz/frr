@@ -1138,6 +1138,7 @@ struct zapi_lag_bond_status {
 	uint8_t status;	      /* enum zapi_lag_bond_status_code */
 	uint8_t bond_mode;    /* kernel bond mode (0..6), ZAPI_LAG_BOND_MODE_UNKNOWN */
 	uint8_t member_count; /* members, attached or detached by micro-BFD */
+	uint16_t min_links;   /* the bond's min_links (0: not set or unknown) */
 };
 #define ZAPI_LAG_BOND_MODE_UNKNOWN 0xff
 

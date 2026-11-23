@@ -5119,6 +5119,7 @@ int zapi_lag_bond_status_encode(struct stream *s, vrf_id_t vrf_id,
 	stream_putc(s, st->status);
 	stream_putc(s, st->bond_mode);
 	stream_putc(s, st->member_count);
+	stream_putw(s, st->min_links);
 	stream_putw_at(s, 0, stream_get_endp(s));
 	return 0;
 }
@@ -5130,6 +5131,7 @@ int zapi_lag_bond_status_decode(struct stream *s, struct zapi_lag_bond_status *s
 	STREAM_GETC(s, st->status);
 	STREAM_GETC(s, st->bond_mode);
 	STREAM_GETC(s, st->member_count);
+	STREAM_GETW(s, st->min_links);
 	return 0;
 
 stream_failure:

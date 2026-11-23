@@ -2082,8 +2082,9 @@ void bfd_lag_zebra_bond_status(vrf_id_t vrf_id, const struct zapi_lag_bond_statu
 	if (!lag)
 		return;
 
-	LAG_DEBUG("lag %s: bond status %s, mode %u, %u members", lag->name,
-		  zapi_lag_bond_status2str(st->status), st->bond_mode, st->member_count);
+	LAG_DEBUG("lag %s: bond status %s, mode %u, %u members, min_links %u", lag->name,
+		  zapi_lag_bond_status2str(st->status), st->bond_mode, st->member_count,
+		  st->min_links);
 
 	if (!lag->status_known || lag->status != st->status) {
 		if (st->status != ZAPI_LAG_BOND_OK)
@@ -2094,6 +2095,7 @@ void bfd_lag_zebra_bond_status(vrf_id_t vrf_id, const struct zapi_lag_bond_statu
 	lag->status_known = true;
 	lag->status = st->status;
 	lag->bond_mode = st->bond_mode;
+	lag->min_links = st->min_links;
 
 	if (st->status == ZAPI_LAG_BOND_NOT_FOUND) {
 		/* Gone: forget it, register again when a bond of that name appears. */

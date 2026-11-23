@@ -71,6 +71,7 @@ struct mbfd_reg {
 	/* last status sent to the client */
 	bool status_sent;
 	uint8_t status;
+	uint16_t min_links;
 };
 DECLARE_DLIST(mbfd_regs, struct mbfd_reg, item);
 
@@ -228,6 +229,15 @@ static void mbfd_count_cb(struct interface *ifp, void *arg)
 		ca->count++;
 }
 
+/* The bond's min_links as the kernel reports it (0: none, or no bond). */
+static uint16_t mbfd_bond_min_links(const struct mbfd_reg *reg)
+{
+	struct interface *bond = mbfd_reg_bond(reg);
+	struct zebra_if *zif = bond ? bond->info : NULL;
+
+	return zif ? MIN(zif->bond_info.min_links, UINT16_MAX) : 0;
+}
+
 static uint8_t mbfd_bond_status(const struct mbfd_reg *reg, uint8_t *mode, uint8_t *count)
 {
 	struct interface *bond = mbfd_reg_bond(reg);
@@ -364,16 +374,19 @@ static void mbfd_send_status(struct mbfd_reg *reg, bool force)
 	struct stream *s;
 
 	st.status = mbfd_bond_status(reg, &st.bond_mode, &st.member_count);
-	if (!force && reg->status_sent && reg->status == st.status)
+	st.min_links = mbfd_bond_min_links(reg);
+	if (!force && reg->status_sent && reg->status == st.status &&
+	    reg->min_links == st.min_links)
 		return;
 
 	reg->status = st.status;
+	reg->min_links = st.min_links;
 	reg->status_sent = true;
 
 	if (IS_ZEBRA_DEBUG_EVENT)
-		zlog_debug("micro-BFD: bond ifindex %u status %s (mode %u, %u members) to %s",
+		zlog_debug("micro-BFD: bond ifindex %u status %s (mode %u, %u members, min_links %u) to %s",
 			   reg->bond_ifindex, zapi_lag_bond_status2str(st.status), st.bond_mode,
-			   st.member_count, zebra_route_string(reg->client->proto));
+			   st.member_count, st.min_links, zebra_route_string(reg->client->proto));
 
 	s = stream_new(ZEBRA_MAX_PACKET_SIZ);
 	zapi_lag_bond_status_encode(s, reg->vrf_id, &st);
@@ -817,6 +830,9 @@ void zebra_mbfd_if_update(struct interface *ifp)
 			if (!reg->status_sent ||
 			    mbfd_bond_status(reg, &mode, &count) != reg->status)
 				mbfd_reg_resync(reg);
+			/* ... or only min_links changed (BLB inherit mode uses it). */
+			else if (mbfd_bond_min_links(reg) != reg->min_links)
+				mbfd_send_status(reg, false);
 		}
 	}
 
@@ -1333,11 +1349,12 @@ void zebra_mbfd_if_show(struct vty *vty, json_object *json_if, struct interface 
 			json_object_string_add(jo, "client", client);
 			json_object_string_add(jo, "status", zapi_lag_bond_status2str(reg->status));
 			json_object_boolean_add(jo, "failOpen", fo);
+			json_object_int_add(jo, "minLinks", reg->min_links);
 			json_object_object_add(json_if, "microBfdBond", jo);
 		} else {
-			vty_out(vty, "  micro-BFD: registered by %s, status %s, %s\n", client,
-				zapi_lag_bond_status2str(reg->status),
-				fo ? "fail-open" : "fail-closed");
+			vty_out(vty, "  micro-BFD: registered by %s, status %s, %s, min_links %u\n",
+				client, zapi_lag_bond_status2str(reg->status),
+				fo ? "fail-open" : "fail-closed", reg->min_links);
 		}
 	}
 
