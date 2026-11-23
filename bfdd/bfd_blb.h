@@ -34,12 +34,22 @@ enum bfd_blb_mode {
 };
 
 /*
- * Timer rule (logical mode): BLB detection >= 2 x micro-BFD detection +
- * BFD_BLB_MARGIN_MS. The worst case for BLB riding on a silently failed
- * member is micro-BFD detection, the hold and rehash (10-30 ms), one BLB
- * interval until its next packet takes a good member, and peer skew.
+ * Timer rule (logical mode):
+ *
+ *   BLB detection >= micro-BFD detection + BFD_BLB_REHASH_MS + BLB interval
+ *
+ * BLB packets are lost from a silent member failure until the bond sends on
+ * another member: micro-BFD detection, then the time the bond takes to stop
+ * using the held member. Depending on where BLB's send times fall, that
+ * window costs up to one more packet than it spans, so BLB survives only if
+ * (multiplier - 1) x interval covers it.
+ *
+ * The rehash allowance covers the bond: its link monitor (miimon) and, on
+ * NICs that offload the bond (mlx5 hardware LAG), the remap of the transmit
+ * queues: 250-450 ms measured on ConnectX with hardware LAG, tens of ms
+ * without.
  */
-#define BFD_BLB_MARGIN_MS 100
+#define BFD_BLB_REHASH_MS 500
 
 /*
  * Events are checked together this long after the first one (ms), so the

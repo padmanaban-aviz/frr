@@ -1097,9 +1097,10 @@ detection time runs out.
    configuration (a single-hop session whose interface is the bond, in the
    bond's VRF) against the rule
 
-   ``BLB detection time >= 2 x micro-BFD detection time + 100 ms``
+   ``BLB detection time >= micro-BFD detection time + 500 ms + one BLB interval``
 
-   and warn in the log, in ``show bfd lag`` and in ``show bfd peers`` (text
+   (that is, ``(BLB multiplier - 1) x BLB interval >= micro-BFD detection
+   time + 500 ms``) and warn in the log, in ``show bfd lag`` and in ``show bfd peers`` (text
    and JSON) when it isn't met. The BLB session itself runs and is reported
    to its clients unchanged; nothing is refused and no timer is changed.
    The command name and meaning follow IOS XR's ``bfd bundle coexistence
@@ -1112,18 +1113,23 @@ detection time runs out.
    configured multiplier times receive interval while it is down, so a
    configuration that is too fast is reported before it matters.
 
-   The margin covers the worst case for BLB riding on a silently failed
-   member: micro-BFD detection, the hold and the bond's rehash (10 to 30
-   ms), one BLB interval until its next packet takes a good member, and
-   timing differences between the peers. For example:
+   BLB loses its packets from a silent member failure until the bond sends
+   on another member: the micro-BFD detection time, then the time the bond
+   takes to stop using the held member (the rehash allowance, 500 ms). The
+   allowance covers the bond's link monitor and, on NICs that offload the
+   bond, the remap of their transmit queues: 250 to 450 ms were measured on
+   NVIDIA ConnectX NICs with hardware LAG active, tens of ms without.
+   Depending on where BLB's send times fall, that window costs up to one
+   packet more than it spans, so BLB survives only while ``multiplier - 1``
+   intervals cover it. A multiplier of 1 never does. For example:
 
-   ===============  ===============  ===============  =================
-   micro-BFD        micro detection  BLB minimum      example BLB
-   ===============  ===============  ===============  =================
-   50 ms x 3        150 ms           400 ms           150 ms x 3
-   100 ms x 3       300 ms           700 ms           250 ms x 3
-   300 ms x 3       900 ms           1900 ms          700 ms x 3
-   ===============  ===============  ===============  =================
+   ===============  ===============  =======================  ================
+   micro-BFD        micro detection  (mult - 1) x interval    example BLB
+   ===============  ===============  =======================  ================
+   50 ms x 3        150 ms           650 ms                   350 ms x 3
+   100 ms x 3       300 ms           800 ms                   400 ms x 3
+   300 ms x 3       900 ms           1400 ms                  700 ms x 3
+   ===============  ===============  =======================  ================
 
    Without the command, BLB sessions are not checked. Coexistence in
    inherit mode (BLB state taken from the micro-BFD sessions, no BLB
@@ -1150,13 +1156,15 @@ detection time runs out.
 
    ``show bfd lag`` then adds::
 
-      BLB coexistence: logical, micro-BFD detection 300 ms, BLB needs at least 700 ms
-        10.0.40.2: up, detection 900 ms, ok
+      BLB coexistence: logical, micro-BFD detection 300 ms, rehash allowance 500 ms
+        10.0.40.2: up, detection 1200 ms, needs 1200 ms, ok
 
-   JSON: ``blbMode``, ``blbMicroDetectionTime``, ``blbRequiredDetectionTime``
-   and ``blbSessions`` in ``show bfd lag json``; a ``blb`` object (``lag``,
-   ``mode``, ``detectionTime``, ``requiredDetectionTime``, ``ok``) on the
-   session in ``show bfd peers json``.
+   JSON: ``blbMode``, ``blbMicroDetectionTime``, ``blbRehashAllowance`` and
+   ``blbSessions`` (per session ``state``, ``detectionTime``, ``interval``,
+   ``requiredDetectionTime``, ``ok``) in ``show bfd lag json``; a ``blb``
+   object (``lag``, ``mode``, ``detectionTime``, ``interval``,
+   ``requiredDetectionTime``, ``ok``) on the session in ``show bfd peers
+   json``.
 
 
 .. _bfd-distributed:

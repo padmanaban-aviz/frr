@@ -14,9 +14,10 @@
 # and one BLB session on bond0 (UDP 3784).
 #
 # - the BLB session comes Up next to the micro-BFD sessions;
-# - BLB 400 ms x 3 (1200 ms) is below 2 x 600 + 100 = 1300 ms: show, JSON and
-#   the log say it is too fast;
-# - BLB 450 ms x 3 (1350 ms) meets the rule: the warning clears;
+# - BLB 400 ms x 3 (1200 ms) is below 600 + 500 + 400 = 1500 ms: show, JSON
+#   and the log say it is too fast;
+# - BLB 600 ms x 3 (1800 ms) meets 600 + 500 + 600 = 1700 ms: the warning
+#   clears;
 # - one link fails silently in both directions: micro-BFD holds the member
 #   down, the bond rehashes, and the BLB session stays Up;
 # - removing the command stops the check.
@@ -181,8 +182,8 @@ def _blb_up(tgen):
     return None
 
 
-def _blb_rule(tgen, ok, detect):
-    "Every end reports the rule as `ok`, with BLB detection `detect` ms."
+def _blb_rule(tgen, ok, detect, need):
+    "Every end reports the rule as `ok`, BLB detection `detect`, needing `need` ms."
     for rname in ("r1", "r2"):
         router = tgen.gears[rname]
         lag = _lag(router)
@@ -192,13 +193,23 @@ def _blb_rule(tgen, ok, detect):
             return "{}: micro detection {}".format(
                 rname, lag.get("blbMicroDetectionTime")
             )
-        if lag.get("blbRequiredDetectionTime") != 1300:
-            return "{}: required {}".format(rname, lag.get("blbRequiredDetectionTime"))
+        if lag.get("blbRehashAllowance") != 500:
+            return "{}: rehash allowance {}".format(
+                rname, lag.get("blbRehashAllowance")
+            )
         s = lag.get("blbSessions", {}).get(PEER[rname], {})
-        if s.get("ok") != ok or s.get("detectionTime") != detect:
+        if (
+            s.get("ok") != ok
+            or s.get("detectionTime") != detect
+            or s.get("requiredDetectionTime") != need
+        ):
             return "{}: BLB session in show bfd lag {}".format(rname, s)
         b = _blb_peer(router).get("blb", {})
-        if b.get("lag") != "bond0" or b.get("ok") != ok:
+        if (
+            b.get("lag") != "bond0"
+            or b.get("ok") != ok
+            or b.get("requiredDetectionTime") != need
+        ):
             return "{}: blb in show bfd peers {}".format(rname, b)
     return None
 
@@ -246,19 +257,19 @@ def test_rule_broken():
     tgen = get_topogen()
     _skip(tgen)
 
-    _expect(_blb_rule, tgen, False, 1200, count=30)
+    _expect(_blb_rule, tgen, False, 1200, 1500, count=30)
     out = tgen.gears["r1"].vtysh_cmd("show bfd lag bond0")
-    assert "BLB needs at least 1300 ms" in out, out
-    assert "too fast" in out, out
+    assert "rehash allowance 500 ms" in out, out
+    assert "needs 1500 ms, too fast" in out, out
 
 
 def test_rule_met():
-    "BLB 450 ms x 3 meets the rule: the warning clears."
+    "BLB 600 ms x 3 meets the rule: the warning clears."
     tgen = get_topogen()
     _skip(tgen)
 
-    _set_blb_timers(tgen, 450)
-    _expect(_blb_rule, tgen, True, 1350, count=30)
+    _set_blb_timers(tgen, 600)
+    _expect(_blb_rule, tgen, True, 1800, 1700, count=30)
     _expect(_blb_up, tgen)
 
 
@@ -304,7 +315,7 @@ def test_mode_removed():
 
     # Too fast again, then remove the command.
     _set_blb_timers(tgen, 400)
-    _expect(_blb_rule, tgen, False, 1200, count=30)
+    _expect(_blb_rule, tgen, False, 1200, 1500, count=30)
     for router in tgen.routers().values():
         router.vtysh_cmd("configure terminal\nbfd\nno bundle coexistence bob-blb\n")
 

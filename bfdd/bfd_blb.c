@@ -13,10 +13,17 @@
  * of its own and checks, for every BLB session of a bond that has a "lag"
  * configuration, that
  *
- *   BLB detection >= 2 x micro-BFD detection + 100 ms
+ *   BLB detection >= micro-BFD detection + BFD_BLB_REHASH_MS + BLB interval
  *
- * and warns (log, show, JSON) when it isn't. Nothing is refused and no timer
- * is changed, so existing configurations keep working.
+ * that is, (BLB multiplier - 1) x BLB interval >= micro-BFD detection +
+ * BFD_BLB_REHASH_MS, and warns (log, show, JSON) when it isn't. Nothing is
+ * refused and no timer is changed, so existing configurations keep working.
+ *
+ * Why: BLB packets are lost from the silent failure until the bond sends on
+ * another member, a window of micro-BFD detection plus the time the bond
+ * takes to stop using the held member. BLB survives while fewer than its
+ * multiplier packets in a row are lost, and depending on where its send
+ * times fall that window costs up to window / interval + 1 packets.
  *
  * micro-BFD detection is the largest negotiated detection time over the
  * bond's Up micro-BFD sessions, or the configured one while none is Up. BLB
@@ -136,26 +143,42 @@ static uint32_t blb_micro_detect_ms(const struct bfd_lag *lag)
 	return BFD_DEFDETECTMULT * MAX(BFD_DEFREQUIREDMINRX, BFD_DEFDESIREDMINTX) / 1000;
 }
 
-/* BLB detection (ms). */
-static uint32_t blb_detect_ms(const struct bfd_session *bs)
-{
-	uint32_t d;
+/*
+ * BLB detection time and the interval of the packets it times (ms): the
+ * negotiated ones while Up, the configured ones otherwise.
+ */
+struct blb_timing {
+	uint32_t detect;
+	uint32_t interval;
+};
 
-	if (bs->ses_state == PTM_BFD_UP && bs->detect_TO)
-		d = bs->detect_TO / 1000;
-	else
-		d = bs->detect_mult * bs->timers.required_min_rx / 1000;
+static struct blb_timing blb_timing(const struct bfd_session *bs)
+{
+	struct blb_timing t;
+
+	if (bs->ses_state == PTM_BFD_UP && bs->detect_TO) {
+		uint8_t mult = bs->remote_detect_mult ? bs->remote_detect_mult : bs->detect_mult;
+
+		t.detect = bs->detect_TO / 1000;
+		t.interval = mult ? t.detect / mult : t.detect;
+	} else {
+		t.detect = bs->detect_mult * bs->timers.required_min_rx / 1000;
+		t.interval = bs->timers.required_min_rx / 1000;
+	}
 
 	/* Echo packets are hashed onto one member too. */
-	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_ECHO_ACTIVE) && bs->echo_detect_TO)
-		d = MIN(d, (uint32_t)(bs->echo_detect_TO / 1000));
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_ECHO_ACTIVE) && bs->echo_detect_TO &&
+	    bs->echo_detect_TO / 1000 < t.detect) {
+		t.detect = bs->echo_detect_TO / 1000;
+		t.interval = bs->echo_xmt_TO / 1000;
+	}
 
-	return d;
+	return t;
 }
 
-static uint32_t blb_need_ms(uint32_t micro)
+static uint32_t blb_need_ms(uint32_t micro, const struct blb_timing *t)
 {
-	return 2 * micro + BFD_BLB_MARGIN_MS;
+	return micro + BFD_BLB_REHASH_MS + t->interval;
 }
 
 static void blb_check_session(struct bfd_session *bs)
@@ -163,6 +186,7 @@ static void blb_check_session(struct bfd_session *bs)
 	struct bfd_blb_state *st = &bs->blb;
 	struct bfd_lag *lag = NULL;
 	uint32_t micro = 0, detect = 0, need = 0;
+	struct blb_timing t = {};
 	bool too_fast = false;
 	char buf[INET6_ADDRSTRLEN];
 
@@ -171,17 +195,18 @@ static void blb_check_session(struct bfd_session *bs)
 	if (lag)
 		micro = blb_micro_detect_ms(lag);
 	if (micro) {
-		detect = blb_detect_ms(bs);
-		need = blb_need_ms(micro);
+		t = blb_timing(bs);
+		detect = t.detect;
+		need = blb_need_ms(micro, &t);
 		too_fast = detect < need;
 	}
 
 	if (too_fast) {
 		/* Once per change of the values. */
 		if (!st->too_fast || st->detect_ms != detect || st->need_ms != need)
-			zlog_warn("lag %s: BLB %s detection %u ms is below %u ms needed for micro-BFD %u ms (bundle coexistence bob-blb logical)",
+			zlog_warn("lag %s: BLB %s detection %u ms is below %u ms needed for micro-BFD %u ms, rehash %u ms and one %u ms interval (bundle coexistence bob-blb logical)",
 				  lag->name, blb_peer_str(bs, buf, sizeof(buf)), detect, need,
-				  micro);
+				  micro, BFD_BLB_REHASH_MS, t.interval);
 		st->too_fast = true;
 		st->detect_ms = detect;
 		st->need_ms = need;
@@ -312,7 +337,7 @@ struct blb_show_ctx {
 	const struct bfd_lag *lag;
 	struct vty *vty;
 	json_object *jsess;
-	uint32_t need;
+	uint32_t micro;
 };
 
 static void blb_show_iter(struct hash_bucket *hb, void *arg)
@@ -320,59 +345,63 @@ static void blb_show_iter(struct hash_bucket *hb, void *arg)
 	struct blb_show_ctx *ctx = arg;
 	struct bfd_session *bs = hb->data;
 	char buf[INET6_ADDRSTRLEN];
-	uint32_t detect;
+	struct blb_timing t;
+	uint32_t need = 0;
 	bool ok;
 
 	if (bfd_blb_session_lag(bs) != ctx->lag)
 		return;
 
-	detect = blb_detect_ms(bs);
-	ok = !ctx->need || detect >= ctx->need;
+	t = blb_timing(bs);
+	if (ctx->micro)
+		need = blb_need_ms(ctx->micro, &t);
+	ok = !need || t.detect >= need;
 	blb_peer_str(bs, buf, sizeof(buf));
 
 	if (ctx->jsess) {
 		json_object *js = json_object_new_object();
 
 		json_object_string_add(js, "state", state_list[bs->ses_state].str);
-		json_object_int_add(js, "detectionTime", detect);
+		json_object_int_add(js, "detectionTime", t.detect);
+		json_object_int_add(js, "interval", t.interval);
+		json_object_int_add(js, "requiredDetectionTime", need);
 		json_object_boolean_add(js, "ok", ok);
 		json_object_object_add(ctx->jsess, buf, js);
 	} else {
-		const char *verdict = "";
-
-		if (ctx->need)
-			verdict = ok ? ", ok" : ", too fast";
-		vty_out(ctx->vty, "    %s: %s, detection %u ms%s\n", buf,
-			state_list[bs->ses_state].str, detect, verdict);
+		if (need)
+			vty_out(ctx->vty, "    %s: %s, detection %u ms, needs %u ms, %s\n", buf,
+				state_list[bs->ses_state].str, t.detect, need,
+				ok ? "ok" : "too fast");
+		else
+			vty_out(ctx->vty, "    %s: %s, detection %u ms\n", buf,
+				state_list[bs->ses_state].str, t.detect);
 	}
 }
 
 void bfd_blb_show_lag(struct vty *vty, const struct bfd_lag *lag, json_object *jl)
 {
 	struct blb_show_ctx ctx = { .lag = lag, .vty = vty };
-	uint32_t micro;
 
 	if (jl)
 		json_object_string_add(jl, "blbMode", bfd_blb_mode2str(blb_mode));
 	if (blb_mode == BFD_BLB_MODE_NONE)
 		return;
 
-	micro = blb_micro_detect_ms(lag);
-	ctx.need = micro ? blb_need_ms(micro) : 0;
+	ctx.micro = blb_micro_detect_ms(lag);
 
 	if (jl) {
 		ctx.jsess = json_object_new_object();
-		json_object_int_add(jl, "blbMicroDetectionTime", micro);
-		json_object_int_add(jl, "blbRequiredDetectionTime", ctx.need);
+		json_object_int_add(jl, "blbMicroDetectionTime", ctx.micro);
+		json_object_int_add(jl, "blbRehashAllowance", BFD_BLB_REHASH_MS);
 		bfd_key_iterate(blb_show_iter, &ctx);
 		json_object_object_add(jl, "blbSessions", ctx.jsess);
 		return;
 	}
 
-	if (micro)
+	if (ctx.micro)
 		vty_out(vty,
-			"  BLB coexistence: %s, micro-BFD detection %u ms, BLB needs at least %u ms\n",
-			bfd_blb_mode2str(blb_mode), micro, ctx.need);
+			"  BLB coexistence: %s, micro-BFD detection %u ms, rehash allowance %u ms\n",
+			bfd_blb_mode2str(blb_mode), ctx.micro, BFD_BLB_REHASH_MS);
 	else
 		vty_out(vty,
 			"  BLB coexistence: %s, no micro-BFD address family configured: BLB timers not checked\n",
@@ -383,7 +412,8 @@ void bfd_blb_show_lag(struct vty *vty, const struct bfd_lag *lag, json_object *j
 void bfd_blb_show_peer(struct vty *vty, const struct bfd_session *bs, json_object *jo)
 {
 	const struct bfd_lag *lag;
-	uint32_t micro, need = 0, detect;
+	uint32_t micro, need = 0;
+	struct blb_timing t;
 
 	if (blb_mode == BFD_BLB_MODE_NONE)
 		return;
@@ -392,18 +422,19 @@ void bfd_blb_show_peer(struct vty *vty, const struct bfd_session *bs, json_objec
 		return;
 
 	micro = blb_micro_detect_ms(lag);
+	t = blb_timing(bs);
 	if (micro)
-		need = blb_need_ms(micro);
-	detect = blb_detect_ms(bs);
+		need = blb_need_ms(micro, &t);
 
 	if (jo) {
 		json_object *jb = json_object_new_object();
 
 		json_object_string_add(jb, "lag", lag->name);
 		json_object_string_add(jb, "mode", bfd_blb_mode2str(blb_mode));
-		json_object_int_add(jb, "detectionTime", detect);
+		json_object_int_add(jb, "detectionTime", t.detect);
+		json_object_int_add(jb, "interval", t.interval);
 		json_object_int_add(jb, "requiredDetectionTime", need);
-		json_object_boolean_add(jb, "ok", !need || detect >= need);
+		json_object_boolean_add(jb, "ok", !need || t.detect >= need);
 		json_object_object_add(jo, "blb", jb);
 		return;
 	}
@@ -413,6 +444,6 @@ void bfd_blb_show_peer(struct vty *vty, const struct bfd_session *bs, json_objec
 			bfd_blb_mode2str(blb_mode), lag->name);
 	else
 		vty_out(vty, "\t\tBLB: %s on lag %s, detection %u ms, needs %u ms: %s\n",
-			bfd_blb_mode2str(blb_mode), lag->name, detect, need,
-			detect >= need ? "ok" : "too fast");
+			bfd_blb_mode2str(blb_mode), lag->name, t.detect, need,
+			t.detect >= need ? "ok" : "too fast");
 }
