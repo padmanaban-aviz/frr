@@ -36,6 +36,22 @@
  * first: a poll sequence moves the detection time through intermediate
  * values that would each be warned about otherwise.
  *
+ * "bundle coexistence bob-blb inherit" makes each BLB session a virtual
+ * session: it keeps its discriminator and configuration, so clients
+ * register, see and show it as before, but it sends no packets and runs no
+ * timer (event.c and ptm_bfd_snd() skip it). Its state follows the bond's
+ * aggregate of its address family: Up while at least min_links members
+ * (at least one) are in and have their micro-BFD session Up, Down with
+ * diag concatenated path down otherwise. A member failure is then handled
+ * by micro-BFD alone and never reaches the clients; a bond failure does,
+ * at micro-BFD speed. Both ends must run inherit: a control packet on UDP
+ * 3784 for a virtual session means the peer runs a real BLB session, and
+ * is counted and reported as a peer mismatch, not answered.
+ *
+ * Inherited states change on the next event loop pass after the event (no
+ * extra delay; micro-BFD detection and hold-down already damp flapping),
+ * outside of the session code that reported it.
+ *
  * Copyright (C) 2026 Aviz Networks
  */
 
@@ -50,6 +66,7 @@
 
 static enum bfd_blb_mode blb_mode = BFD_BLB_MODE_NONE;
 static struct event *t_blb_check;
+static struct event *t_blb_inherit;
 
 #define BLB_DEBUG(fmt, ...)                                                                       \
 	do {                                                                                      \
@@ -62,6 +79,8 @@ const char *bfd_blb_mode2str(enum bfd_blb_mode mode)
 	switch (mode) {
 	case BFD_BLB_MODE_LOGICAL:
 		return "logical";
+	case BFD_BLB_MODE_INHERIT:
+		return "inherit";
 	case BFD_BLB_MODE_NONE:
 		break;
 	}
@@ -220,7 +239,9 @@ static void blb_check_session(struct bfd_session *bs)
 		else
 			BLB_DEBUG("%s: no longer checked", blb_peer_str(bs, buf, sizeof(buf)));
 	}
-	memset(st, 0, sizeof(*st));
+	st->too_fast = false;
+	st->detect_ms = 0;
+	st->need_ms = 0;
 }
 
 static void blb_check_iter(struct hash_bucket *hb, void *arg)
@@ -259,12 +280,14 @@ static void blb_check_lags(void)
 
 	for (lag = (struct bfd_lag *)bfd_lag_next(NULL); lag;
 	     lag = (struct bfd_lag *)bfd_lag_next(lag)) {
-		bool warn = blb_mode == BFD_BLB_MODE_LOGICAL && !blb_micro_detect_ms(lag) &&
+		bool warn = blb_mode != BFD_BLB_MODE_NONE && !blb_micro_detect_ms(lag) &&
 			    blb_lag_has_blb(lag);
 
 		if (warn && !lag->blb_no_micro_warned)
-			zlog_warn("lag %s: bundle coexistence set but no micro-BFD address family configured: BLB timers not checked",
-				  lag->name);
+			zlog_warn("lag %s: bundle coexistence set but no micro-BFD address family configured: %s",
+				  lag->name,
+				  blb_mode == BFD_BLB_MODE_INHERIT ? "BLB sessions stay down"
+								   : "BLB timers not checked");
 		lag->blb_no_micro_warned = warn;
 	}
 }
@@ -275,11 +298,192 @@ static void blb_check_cb(struct event *t)
 	blb_check_lags();
 }
 
+/*
+ * Inherit mode.
+ */
+
+/* The family whose micro-BFD sessions a BLB session follows. */
+static enum bfd_lag_af blb_session_af(const struct bfd_lag *lag, const struct bfd_session *bs)
+{
+	enum bfd_lag_af af = CHECK_FLAG(bs->flags, BFD_SESS_FLAG_IPV6) ? BFD_LAG_AF_IPV6
+								       : BFD_LAG_AF_IPV4;
+	enum bfd_lag_af other = af == BFD_LAG_AF_IPV4 ? BFD_LAG_AF_IPV6 : BFD_LAG_AF_IPV4;
+
+	/* micro-BFD in one family only: both follow it. */
+	if (!(lag->af[af].use && lag->af[af].has_dest) && lag->af[other].use &&
+	    lag->af[other].has_dest)
+		return other;
+	return af;
+}
+
+static uint32_t blb_min_links(const struct bfd_lag *lag)
+{
+	return MAX(lag->min_links, 1);
+}
+
+/*
+ * Members of the aggregate: in the bond (not held down by micro-BFD),
+ * distributing or standby, with their micro-BFD session of the family Up.
+ */
+static uint32_t blb_aggregate(const struct bfd_lag *lag, enum bfd_lag_af af, uint32_t *members)
+{
+	const struct bfd_lag_member *m = NULL;
+	uint32_t up = 0, total = 0;
+
+	if (!lag->af[af].use || !lag->af[af].has_dest) {
+		if (members)
+			*members = 0;
+		return 0;
+	}
+
+	while ((m = bfd_lag_member_next(lag, m))) {
+		const struct bfd_session *ms = bfd_lag_member_session(m, af);
+
+		total++;
+		if (bfd_lag_member_detached(m))
+			continue;
+		if (!bfd_lag_member_distributing(m) && !bfd_lag_member_standby(m))
+			continue;
+		if (ms && ms->ses_state == PTM_BFD_UP)
+			up++;
+	}
+	if (members)
+		*members = total;
+	return up;
+}
+
+static bool blb_mismatch_active(const struct bfd_session *bs)
+{
+	struct timeval now;
+
+	if (!bs->blb.mismatch_pkts)
+		return false;
+	monotime(&now);
+	return now.tv_sec - bs->blb.mismatch_last.tv_sec < BFD_BLB_MISMATCH_CLEAR;
+}
+
+static void blb_make_virtual(struct bfd_session *bs)
+{
+	char buf[INET6_ADDRSTRLEN];
+
+	bs->blb.virt = true;
+	bs->blb.mismatch_pkts = 0;
+	bfd_recvtimer_delete(bs);
+	bfd_xmttimer_delete(bs);
+	ptm_bfd_echo_stop(bs);
+	bs->polling = 0;
+	if (bs->ses_state != PTM_BFD_UP && bs->ses_state != PTM_BFD_ADM_DOWN)
+		bs->local_diag = BD_CONCATPATH_DOWN;
+	BLB_DEBUG("%s: virtual (inherit), no packets", blb_peer_str(bs, buf, sizeof(buf)));
+}
+
+static void blb_make_real(struct bfd_session *bs)
+{
+	char buf[INET6_ADDRSTRLEN];
+
+	bs->blb.virt = false;
+	bs->blb.mismatch_pkts = 0;
+	BLB_DEBUG("%s: real session again", blb_peer_str(bs, buf, sizeof(buf)));
+
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->ses_state == PTM_BFD_ADM_DOWN)
+		return;
+
+	/* Start over as a real session: Down, then the three-way handshake. */
+	if (bs->ses_state != PTM_BFD_DOWN)
+		ptm_bfd_sess_dn(bs, BD_PATH_DOWN, false);
+	else
+		bs_set_slow_timers(bs);
+
+	if (!CHECK_FLAG(bs->flags, BFD_SESS_FLAG_PASSIVE)) {
+		bfd_recvtimer_update(bs);
+		ptm_bfd_start_xmt_timer(bs, false);
+	}
+}
+
+/* Make the session virtual or real as the mode wants, set its state. */
+static void blb_inherit_sync(struct bfd_session *bs)
+{
+	struct bfd_lag *lag = NULL;
+	enum bfd_lag_af af;
+	uint32_t up, members, need;
+	char buf[INET6_ADDRSTRLEN];
+
+	if (blb_mode == BFD_BLB_MODE_INHERIT && bs->sock != -1 && !bs->bdc)
+		lag = bfd_blb_session_lag(bs);
+
+	if (lag && !bs->blb.virt)
+		blb_make_virtual(bs);
+	else if (!lag && bs->blb.virt)
+		blb_make_real(bs);
+	if (!bs->blb.virt)
+		return;
+
+	/* Configuration changes may have asked for a poll: nothing is sent. */
+	bs->polling = 0;
+
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->ses_state == PTM_BFD_ADM_DOWN)
+		return;
+
+	af = blb_session_af(lag, bs);
+	up = blb_aggregate(lag, af, &members);
+	need = blb_min_links(lag);
+
+	if (up >= need && bs->ses_state != PTM_BFD_UP) {
+		zlog_notice("lag %s: BLB %s inherited up (%s %u of %u members, min_links %u)",
+			    lag->name, blb_peer_str(bs, buf, sizeof(buf)),
+			    af == BFD_LAG_AF_IPV4 ? "IPv4" : "IPv6", up, members, need);
+		ptm_bfd_sess_up(bs);
+		bs->polling = 0;
+	} else if (up < need && bs->ses_state != PTM_BFD_DOWN) {
+		if (bs->ses_state == PTM_BFD_UP)
+			zlog_warn("lag %s: BLB %s inherited down (%s %u of %u members, min_links %u)",
+				  lag->name, blb_peer_str(bs, buf, sizeof(buf)),
+				  af == BFD_LAG_AF_IPV4 ? "IPv4" : "IPv6", up, members, need);
+		ptm_bfd_sess_dn(bs, BD_CONCATPATH_DOWN, false);
+	}
+}
+
+static void blb_inherit_iter(struct hash_bucket *hb, void *arg)
+{
+	struct bfd_session *bs = hb->data;
+
+	if (bs->bfd_mode == BFD_MODE_TYPE_BFD)
+		blb_inherit_sync(bs);
+}
+
+static void blb_inherit_cb(struct event *t)
+{
+	bfd_key_iterate(blb_inherit_iter, NULL);
+}
+
+static void blb_inherit_schedule(void)
+{
+	if (bglobal.bg_shutdown)
+		return;
+	event_add_event(master, blb_inherit_cb, NULL, 0, &t_blb_inherit);
+}
+
+void bfd_blb_rx_virtual(struct bfd_session *bs)
+{
+	char buf[INET6_ADDRSTRLEN];
+	struct bfd_lag *lag = bfd_blb_session_lag(bs);
+
+	/* Logged when the mark is set, again after it cleared. */
+	if (!blb_mismatch_active(bs))
+		zlog_warn("lag %s: BLB peer %s sends BFD on 3784, inherit mode needs inherit on the peer",
+			  lag ? lag->name : "?", blb_peer_str(bs, buf, sizeof(buf)));
+	bs->blb.mismatch_pkts++;
+	monotime(&bs->blb.mismatch_last);
+}
+
 void bfd_blb_changed(void)
 {
 	/* Sessions freed on the way out need no check. */
 	if (bglobal.bg_shutdown)
 		return;
+
+	if (blb_mode == BFD_BLB_MODE_INHERIT)
+		blb_inherit_schedule();
 
 	/* Already pending: this event is covered by it. */
 	event_add_timer_msec(master, blb_check_cb, NULL, BFD_BLB_CHECK_DELAY, &t_blb_check);
@@ -288,7 +492,7 @@ void bfd_blb_changed(void)
 void bfd_blb_session_changed(const struct bfd_session *bs)
 {
 	/* A session with nothing to clear while the mode is off. */
-	if (blb_mode == BFD_BLB_MODE_NONE && !bs->blb.too_fast)
+	if (blb_mode == BFD_BLB_MODE_NONE && !bs->blb.too_fast && !bs->blb.virt)
 		return;
 
 	switch (bs->bfd_mode) {
@@ -317,6 +521,8 @@ void bfd_blb_set_mode(enum bfd_blb_mode mode)
 	else
 		zlog_warn("bundle coexistence bob-blb changed to %s: peers must use the same mode",
 			  bfd_blb_mode2str(mode));
+	/* Sessions become virtual, or real again. */
+	blb_inherit_schedule();
 	bfd_blb_changed();
 }
 
@@ -328,6 +534,7 @@ void bfd_blb_init(void)
 void bfd_blb_terminate(void)
 {
 	event_cancel(&t_blb_check);
+	event_cancel(&t_blb_inherit);
 }
 
 /*
@@ -340,6 +547,31 @@ struct blb_show_ctx {
 	uint32_t micro;
 };
 
+static void blb_show_inherit_session(struct blb_show_ctx *ctx, const struct bfd_session *bs)
+{
+	char buf[INET6_ADDRSTRLEN];
+	enum bfd_lag_af af = blb_session_af(ctx->lag, bs);
+	bool mismatch = blb_mismatch_active(bs);
+
+	blb_peer_str(bs, buf, sizeof(buf));
+	if (ctx->jsess) {
+		json_object *js = json_object_new_object();
+
+		json_object_string_add(js, "state", state_list[bs->ses_state].str);
+		json_object_boolean_add(js, "virtual", bs->blb.virt);
+		json_object_string_add(js, "follows", af == BFD_LAG_AF_IPV4 ? "ipv4" : "ipv6");
+		json_object_boolean_add(js, "peerMismatch", mismatch);
+		json_object_int_add(js, "mismatchPackets", bs->blb.mismatch_pkts);
+		json_object_object_add(ctx->jsess, buf, js);
+		return;
+	}
+	vty_out(ctx->vty, "    %s: %s, %s, follows %s%s\n", buf, state_list[bs->ses_state].str,
+		bs->blb.virt ? "inherited (virtual, no packets)"
+			     : "not virtual (bond or socket not ready)",
+		af == BFD_LAG_AF_IPV4 ? "IPv4" : "IPv6",
+		mismatch ? ", PEER MISMATCH: peer sends BFD on 3784" : "");
+}
+
 static void blb_show_iter(struct hash_bucket *hb, void *arg)
 {
 	struct blb_show_ctx *ctx = arg;
@@ -351,6 +583,11 @@ static void blb_show_iter(struct hash_bucket *hb, void *arg)
 
 	if (bfd_blb_session_lag(bs) != ctx->lag)
 		return;
+
+	if (blb_mode == BFD_BLB_MODE_INHERIT) {
+		blb_show_inherit_session(ctx, bs);
+		return;
+	}
 
 	t = blb_timing(bs);
 	if (ctx->micro)
@@ -387,6 +624,51 @@ void bfd_blb_show_lag(struct vty *vty, const struct bfd_lag *lag, json_object *j
 	if (blb_mode == BFD_BLB_MODE_NONE)
 		return;
 
+	if (blb_mode == BFD_BLB_MODE_INHERIT) {
+		uint32_t up[BFD_LAG_AF_MAX], members[BFD_LAG_AF_MAX];
+
+		for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++)
+			up[af] = blb_aggregate(lag, af, &members[af]);
+
+		if (jl) {
+			json_object *ja = json_object_new_object();
+
+			json_object_int_add(jl, "minLinks", lag->min_links);
+			for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++) {
+				json_object *jf;
+
+				if (!lag->af[af].use || !lag->af[af].has_dest)
+					continue;
+				jf = json_object_new_object();
+				json_object_string_add(jf, "state",
+						       up[af] >= blb_min_links(lag) ? "up"
+										    : "down");
+				json_object_int_add(jf, "membersUp", up[af]);
+				json_object_int_add(jf, "members", members[af]);
+				json_object_object_add(ja, af == BFD_LAG_AF_IPV4 ? "ipv4" : "ipv6",
+						       jf);
+			}
+			json_object_object_add(jl, "blbAggregate", ja);
+			ctx.jsess = json_object_new_object();
+			bfd_key_iterate(blb_show_iter, &ctx);
+			json_object_object_add(jl, "blbSessions", ctx.jsess);
+			return;
+		}
+
+		vty_out(vty, "  BLB coexistence: inherit, min_links %u", blb_min_links(lag));
+		for (enum bfd_lag_af af = 0; af < BFD_LAG_AF_MAX; af++)
+			if (lag->af[af].use && lag->af[af].has_dest)
+				vty_out(vty, ", %s %s (%u of %u members)",
+					af == BFD_LAG_AF_IPV4 ? "IPv4" : "IPv6",
+					up[af] >= blb_min_links(lag) ? "up" : "down", up[af],
+					members[af]);
+		if (!blb_micro_detect_ms(lag))
+			vty_out(vty, ", no micro-BFD address family configured: BLB stays down");
+		vty_out(vty, "\n");
+		bfd_key_iterate(blb_show_iter, &ctx);
+		return;
+	}
+
 	ctx.micro = blb_micro_detect_ms(lag);
 
 	if (jl) {
@@ -420,6 +702,38 @@ void bfd_blb_show_peer(struct vty *vty, const struct bfd_session *bs, json_objec
 	lag = bfd_blb_session_lag(bs);
 	if (!lag)
 		return;
+
+	if (blb_mode == BFD_BLB_MODE_INHERIT) {
+		enum bfd_lag_af af = blb_session_af(lag, bs);
+		uint32_t members, up = blb_aggregate(lag, af, &members);
+		bool mismatch = blb_mismatch_active(bs);
+
+		if (jo) {
+			json_object *jb = json_object_new_object();
+
+			json_object_string_add(jb, "lag", lag->name);
+			json_object_string_add(jb, "mode", bfd_blb_mode2str(blb_mode));
+			json_object_boolean_add(jb, "virtual", bs->blb.virt);
+			json_object_string_add(jb, "follows",
+					       af == BFD_LAG_AF_IPV4 ? "ipv4" : "ipv6");
+			json_object_int_add(jb, "membersUp", up);
+			json_object_int_add(jb, "minLinks", blb_min_links(lag));
+			json_object_boolean_add(jb, "peerMismatch", mismatch);
+			json_object_int_add(jb, "mismatchPackets", bs->blb.mismatch_pkts);
+			json_object_object_add(jo, "blb", jb);
+			return;
+		}
+		vty_out(vty,
+			"\t\tBLB: inherited from lag %s (%s, %s %u of %u members Up, min_links %u)\n",
+			lag->name, bs->blb.virt ? "virtual, no packets" : "not virtual yet",
+			af == BFD_LAG_AF_IPV4 ? "IPv4" : "IPv6", up, members, blb_min_links(lag));
+		if (mismatch)
+			vty_out(vty,
+				"\t\tBLB: PEER MISMATCH, %" PRIu64
+				" packets on 3784: the peer must run inherit too\n",
+				bs->blb.mismatch_pkts);
+		return;
+	}
 
 	micro = blb_micro_detect_ms(lag);
 	t = blb_timing(bs);

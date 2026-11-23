@@ -513,6 +513,9 @@ int bfd_session_enable(struct bfd_session *bs)
 
 	frrtrace(2, frr_bfd, session_enable_event, true, bs);
 
+	/* BLB coexistence, inherit mode: a session on a bond becomes virtual. */
+	bfd_blb_session_changed(bs);
+
 	return 0;
 }
 
@@ -794,6 +797,10 @@ void ptm_bfd_echo_stop(struct bfd_session *bfd)
 
 void ptm_bfd_echo_start(struct bfd_session *bfd)
 {
+	/* BLB coexistence, inherit mode: a virtual session sends nothing. */
+	if (BFD_BLB_VIRTUAL(bfd))
+		return;
+
 	bfd->echo_detect_TO = (bfd->remote_detect_mult * bfd->echo_xmt_TO);
 	if (bfd->echo_detect_TO > 0) {
 		bfd_echo_recvtimer_update(bfd);

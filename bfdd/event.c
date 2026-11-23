@@ -31,8 +31,7 @@ void bfd_recvtimer_update(struct bfd_session *bs)
 	bfd_recvtimer_delete(bs);
 
 	/* Don't add event if peer is deactivated. */
-	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) ||
-	    bs->sock == -1)
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->sock == -1 || BFD_BLB_VIRTUAL(bs))
 		return;
 
 	event_add_timer_tv(master, bfd_recvtimer_cb, bs, &tv,
@@ -47,8 +46,7 @@ void bfd_echo_recvtimer_update(struct bfd_session *bs)
 	bfd_echo_recvtimer_delete(bs);
 
 	/* Don't add event if peer is deactivated. */
-	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) ||
-	    bs->sock == -1)
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->sock == -1 || BFD_BLB_VIRTUAL(bs))
 		return;
 
 	tv_normalize(&tv);
@@ -137,7 +135,8 @@ void bfd_xmttimer_update(struct bfd_session *bs, uint64_t jitter)
 	bfd_xmttimer_delete(bs);
 
 	/* Don't add event if peer is deactivated. */
-	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->sock == -1) {
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->sock == -1 ||
+	    BFD_BLB_VIRTUAL(bs)) {
 		bs->xmt_TO_actual = 0; /* Timer not scheduled */
 		return;
 	}
@@ -159,7 +158,8 @@ void bfd_echo_xmttimer_update(struct bfd_session *bs, uint64_t jitter)
 	bfd_echo_xmttimer_delete(bs);
 
 	/* Don't add event if peer is deactivated. */
-	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->sock == -1) {
+	if (CHECK_FLAG(bs->flags, BFD_SESS_FLAG_SHUTDOWN) || bs->sock == -1 ||
+	    BFD_BLB_VIRTUAL(bs)) {
 		bs->echo_xmt_TO_actual = 0; /* Timer not scheduled */
 		return;
 	}

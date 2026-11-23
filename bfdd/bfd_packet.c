@@ -420,6 +420,10 @@ void ptm_bfd_snd(struct bfd_session *bfd, int fbit)
 	if (bfd->discrs.remote_discr == 0 && CHECK_FLAG(bfd->flags, BFD_SESS_FLAG_PASSIVE))
 		return;
 
+	/* BLB coexistence, inherit mode: a virtual session sends nothing. */
+	if (BFD_BLB_VIRTUAL(bfd))
+		return;
+
 	memset(send_buffer, 0, sizeof(send_buffer));
 
 	/* Set fields according to section 6.5.7 */
@@ -1285,6 +1289,18 @@ void bfd_recv_cb(struct event *t)
 		bfd->stats.rx_bad_ctrl_pkt++;
 		cp_debug(is_mhop, &peer, &local, ifindex, vrfid,
 			 "Your Discriminator names a micro-BFD session: dropped");
+		return;
+	}
+
+	/*
+	 * BLB coexistence, inherit mode: the session is virtual and its peer
+	 * should send nothing here. One that does runs a real BLB session:
+	 * count it, report the mismatch, don't answer.
+	 */
+	if (BFD_BLB_VIRTUAL(bfd)) {
+		bfd_blb_rx_virtual(bfd);
+		cp_debug(is_mhop, &peer, &local, ifindex, vrfid,
+			 "virtual BLB session (inherit mode): peer mismatch, dropped");
 		return;
 	}
 

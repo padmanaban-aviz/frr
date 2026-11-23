@@ -1434,23 +1434,25 @@ void bfd_cli_peer_profile_show(struct vty *vty, const struct lyd_node *dnode,
 #define BOB_BLB_STR	"BFD over bundle members (micro-BFD) and over the logical bundle (BLB)\n"
 
 DEFPY_YANG(bfd_bundle_coexistence, bfd_bundle_coexistence_cmd,
-	"bundle coexistence bob-blb logical$mode",
+	"bundle coexistence bob-blb <logical|inherit>$mode",
 	BUNDLE_STR
 	COEXIST_STR
 	BOB_BLB_STR
-	"BLB runs as its own session; warn when its timers are too fast for micro-BFD\n")
+	"BLB runs as its own session; warn when its timers are too fast for micro-BFD\n"
+	"BLB sends no packets; its state follows the bond's micro-BFD sessions\n")
 {
 	nb_cli_enqueue_change(vty, "/frr-bfdd:bfdd/bfd/bundle-coexistence", NB_OP_MODIFY, mode);
 	return nb_cli_apply_changes(vty, NULL);
 }
 
 DEFPY_YANG(no_bfd_bundle_coexistence, no_bfd_bundle_coexistence_cmd,
-	"no bundle coexistence bob-blb [logical]",
+	"no bundle coexistence bob-blb [<logical|inherit>]",
 	NO_STR
 	BUNDLE_STR
 	COEXIST_STR
 	BOB_BLB_STR
-	"BLB runs as its own session; warn when its timers are too fast for micro-BFD\n")
+	"BLB runs as its own session; warn when its timers are too fast for micro-BFD\n"
+	"BLB sends no packets; its state follows the bond's micro-BFD sessions\n")
 {
 	nb_cli_enqueue_change(vty, "/frr-bfdd:bfdd/bfd/bundle-coexistence", NB_OP_DESTROY, NULL);
 	return nb_cli_apply_changes(vty, NULL);

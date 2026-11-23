@@ -2075,6 +2075,13 @@ void bfd_lag_zebra_connected(void)
 	}
 }
 
+/* Members or min_links changed: BLB coexistence follows (inherit mode). */
+static void lag_blb_event(void)
+{
+	if (bfd_blb_get_mode() != BFD_BLB_MODE_NONE)
+		bfd_blb_changed();
+}
+
 void bfd_lag_zebra_bond_status(vrf_id_t vrf_id, const struct zapi_lag_bond_status *st)
 {
 	struct bfd_lag *lag = lag_by_ifindex(st->bond_ifindex);
@@ -2102,17 +2109,20 @@ void bfd_lag_zebra_bond_status(vrf_id_t vrf_id, const struct zapi_lag_bond_statu
 		lag_members_free(lag);
 		lag_unregister(lag);
 		lag->ifindex = IFINDEX_INTERNAL;
+		lag_blb_event();
 		return;
 	}
 
 	if (st->status != ZAPI_LAG_BOND_OK) {
 		/* No member updates follow for an unusable bond. */
 		lag_members_free(lag);
+		lag_blb_event();
 		return;
 	}
 
 	lag_fail_mode_check(lag);
 	lag_sessions_sync(lag);
+	lag_blb_event();
 }
 
 void bfd_lag_zebra_member(vrf_id_t vrf_id, const struct zapi_lag_member *zm)
@@ -2135,6 +2145,7 @@ void bfd_lag_zebra_member(vrf_id_t vrf_id, const struct zapi_lag_member *zm)
 		if (m) {
 			zlog_info("micro-BFD: lag %s: member %s left the bond", lag->name, m->name);
 			lag_member_free(m);
+			lag_blb_event();
 		}
 		return;
 	}
@@ -2165,6 +2176,7 @@ void bfd_lag_zebra_member(vrf_id_t vrf_id, const struct zapi_lag_member *zm)
 
 	lag_member_sessions_update(m);
 	lag_member_evaluate(m);
+	lag_blb_event();
 }
 
 void bfd_lag_if_add(struct interface *ifp)

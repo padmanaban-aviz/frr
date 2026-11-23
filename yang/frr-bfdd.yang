@@ -52,6 +52,11 @@ module frr-bfdd {
      (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
      OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.";
 
+  revision 2026-11-23 {
+    description
+      "Add the inherit value of bundle-coexistence.";
+  }
+
   revision 2026-11-19 {
     description
       "Add bundle-coexistence: BFD over the bond (BLB) together with
@@ -505,6 +510,16 @@ module frr-bfdd {
                interval, so that micro-BFD takes a silently failed
                member out and the bond moves BLB before it expires,
                and warns when it isn't.";
+          }
+          enum inherit {
+            value 2;
+            description
+              "A BFD session on a bond that runs RFC 7130 micro-BFD
+               becomes a virtual session: it sends no packets and runs
+               no timers, and its state follows the bond's micro-BFD
+               sessions of its address family: Up while at least the
+               bond's min_links members (at least one) have theirs Up.
+               Both ends must use inherit.";
           }
         }
         description
