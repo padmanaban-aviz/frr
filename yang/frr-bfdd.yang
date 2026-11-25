@@ -500,10 +500,11 @@ module frr-bfdd {
               "A BFD session on a bond that runs RFC 7130 micro-BFD
                (BFD over the logical bundle, BLB) runs as its own
                session and is reported unchanged. bfdd checks that
-               its detection time is at least twice the micro-BFD
-               detection time plus 100 ms, so that micro-BFD takes a
-               silently failed member out before BLB expires, and
-               warns when it isn't.";
+               its detection time is at least the micro-BFD detection
+               time plus a 500 ms rehash allowance plus one BLB
+               interval, so that micro-BFD takes a silently failed
+               member out and the bond moves BLB before it expires,
+               and warns when it isn't.";
           }
         }
         description

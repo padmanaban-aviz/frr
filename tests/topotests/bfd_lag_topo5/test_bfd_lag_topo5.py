@@ -226,18 +226,24 @@ def _set_blb_timers(tgen, ms):
 
 
 def _drop_link(tgen, idx, drop):
-    "Silent failure of link `idx`: drop every IP packet leaving both ends."
-    for rname in ("r1", "r2"):
-        router = tgen.gears[rname]
-        ifname = MEMBERS[rname][idx]
-        if drop:
-            router.run("tc qdisc add dev {} clsact".format(ifname))
-            router.run(
-                "tc filter add dev {} egress protocol ip u32 "
-                "match u32 0 0 action drop".format(ifname)
+    """
+    Silent failure of link `idx` in both directions: r1 drops every IP
+    packet it sends or receives on its member, in one command, so both
+    directions fail at the same moment (two commands one after the other
+    leave a one-way window that can be seconds long on a loaded host).
+    """
+    router = tgen.gears["r1"]
+    ifname = MEMBERS["r1"][idx]
+    if drop:
+        router.run(
+            "tc qdisc add dev {0} clsact && "
+            "tc filter add dev {0} egress protocol ip u32 match u32 0 0 action drop && "
+            "tc filter add dev {0} ingress protocol ip u32 match u32 0 0 action drop".format(
+                ifname
             )
-        else:
-            router.run("tc qdisc del dev {} clsact".format(ifname))
+        )
+    else:
+        router.run("tc qdisc del dev {} clsact".format(ifname))
 
 
 def test_sessions_up():
